@@ -960,6 +960,10 @@ function extractMinimaxH3Status(payload: unknown): string {
     getObjectValue(payload, ['data', 'status']),
     getObjectValue(payload, ['state']),
     getObjectValue(payload, ['data', 'state']),
+    getObjectValue(payload, ['task_status']),
+    getObjectValue(payload, ['data', 'task_status']),
+    getObjectValue(payload, ['metadata', 'status']),
+    getObjectValue(payload, ['data', 'metadata', 'status']),
   ];
 
   for (const candidate of candidates) {
@@ -968,7 +972,117 @@ function extractMinimaxH3Status(payload: unknown): string {
     }
   }
 
+  const nestedStatus = collectMinimaxH3StringDiagnostics(payload).find(({ path, value }) => {
+    const key = path[path.length - 1]?.toLowerCase() || '';
+    return ['status', 'state', 'task_status'].includes(key) && value.trim();
+  });
+
+  if (nestedStatus) {
+    return nestedStatus.value.trim().toLowerCase();
+  }
+
   return 'unknown';
+}
+
+function isMinimaxH3FailureMessage(message: string | null): boolean {
+  if (!message) return false;
+  const text = message.toLowerCase();
+  return (
+    text.includes('upstream returned unrecognized message') ||
+    text.includes('unrecognized message') ||
+    text.includes('generation failed') ||
+    text.includes('task failed') ||
+    text.includes('failed') ||
+    text.includes('failure') ||
+    text.includes('error') ||
+    text.includes('invalid') ||
+    text.includes('rejected') ||
+    text.includes('unsupported') ||
+    text.includes('canceled') ||
+    text.includes('cancelled') ||
+    text.includes('unauthorized') ||
+    text.includes('forbidden') ||
+    text.includes('permission denied') ||
+    text.includes('insufficient') ||
+    text.includes('quota') ||
+    text.includes('rate limit') ||
+    text.includes('exceeded')
+  );
+}
+
+type MinimaxH3StringDiagnostic = {
+  path: string[];
+  value: string;
+};
+
+function isMinimaxH3ErrorPath(path: string[]): boolean {
+  const joined = path.join('.').toLowerCase();
+  return (
+    joined.includes('error') ||
+    joined.includes('detail') ||
+    joined.includes('reason') ||
+    joined.includes('message') ||
+    joined.includes('failure') ||
+    joined.includes('exception') ||
+    joined.includes('cause')
+  );
+}
+
+function isMinimaxH3StatusPath(path: string[]): boolean {
+  const key = path[path.length - 1]?.toLowerCase() || '';
+  return ['status', 'state', 'task_status'].includes(key);
+}
+
+function collectMinimaxH3StringDiagnostics(
+  payload: unknown,
+  path: string[] = [],
+  depth = 0,
+  visited = new Set<unknown>()
+): MinimaxH3StringDiagnostic[] {
+  if (depth > 8 || payload === null || payload === undefined) return [];
+
+  if (typeof payload === 'string') {
+    const value = payload.trim();
+    if (!value) return [];
+
+    const nestedStart = value[0];
+    if ((nestedStart === '{' || nestedStart === '[') && value.length < 100_000) {
+      try {
+        return collectMinimaxH3StringDiagnostics(JSON.parse(value), path, depth + 1, visited);
+      } catch {
+        // Keep the original string when it is not parseable JSON.
+      }
+    }
+
+    if (
+      isMinimaxH3FailureMessage(value) ||
+      isMinimaxH3ErrorPath(path) ||
+      isMinimaxH3StatusPath(path) ||
+      path.length === 0
+    ) {
+      return [{ path, value }];
+    }
+
+    return [];
+  }
+
+  if (typeof payload !== 'object') return [];
+  if (visited.has(payload)) return [];
+  visited.add(payload);
+
+  const diagnostics: MinimaxH3StringDiagnostic[] = [];
+  if (Array.isArray(payload)) {
+    payload.forEach((item, index) => {
+      diagnostics.push(...collectMinimaxH3StringDiagnostics(item, [...path, String(index)], depth + 1, visited));
+    });
+    return diagnostics;
+  }
+
+  for (const [key, value] of Object.entries(payload as Record<string, unknown>)) {
+    diagnostics.push(...collectMinimaxH3StringDiagnostics(value, [...path, key], depth + 1, visited));
+  }
+
+  return diagnostics;
 }
 
 function extractMinimaxH3Error(payload: unknown): string | null {
@@ -988,25 +1102,34 @@ function extractMinimaxH3Error(payload: unknown): string | null {
     }
   }
 
+  const diagnostics = collectMinimaxH3StringDiagnostics(payload);
+  const terminal = diagnostics.find(({ value }) => isMinimaxH3FailureMessage(value));
+  if (terminal) return terminal.value;
+
+  const errorField = diagnostics.find(({ path, value }) => isMinimaxH3ErrorPath(path) && value.trim());
+  if (errorField) return errorField.value;
+
   return null;
 }
 
-function isMinimaxH3FailureMessage(message: string | null): boolean {
-  if (!message) return false;
-  const text = message.toLowerCase();
-  return (
-    text.includes('upstream returned unrecognized message') ||
-    text.includes('generation failed') ||
-    text.includes('failed') ||
-    text.includes('error') ||
-    text.includes('invalid') ||
-    text.includes('rejected') ||
-    text.includes('unsupported') ||
-    text.includes('unauthorized') ||
-    text.includes('forbidden') ||
-    text.includes('insufficient') ||
-    text.includes('quota')
-  );
+function isMinimaxH3CompletedStatus(status: string): boolean {
+  return ['completed', 'complete', 'succeeded', 'success', 'done'].includes(status);
+}
+
+function isMinimaxH3TerminalStatus(status: string): boolean {
+  return ['failed', 'failure', 'error', 'rejected', 'canceled', 'cancelled'].includes(status);
+}
+
+function isMinimaxH3ActiveStatus(status: string): boolean {
+  return ['unknown', 'pending', 'queued', 'running', 'processing', 'in_progress', 'submitted', 'created', 'waiting'].includes(status);
+}
+
+function stringifyMinimaxH3PayloadSnippet(payload: unknown, max = 600): string {
+  try {
+    return compactSnippet(JSON.stringify(payload), max);
+  } catch {
+    return compactSnippet(String(payload || ''), max);
+  }
 }
 
 function extractMinimaxH3VideoUrl(payload: unknown, baseUrl: string): string | null {
@@ -1074,6 +1197,7 @@ async function waitForMinimaxH3Task(
 ): Promise<string> {
   const startedAt = Date.now();
   let lastProgress = 10;
+  const loggedPollSignatures = new Set<string>();
   onProgress?.(lastProgress);
 
   while (Date.now() - startedAt < MINIMAX_H3_MAX_WAIT_MS) {
@@ -1099,23 +1223,45 @@ async function waitForMinimaxH3Task(
 
     const status = extractMinimaxH3Status(payload);
     const errorMessage = extractMinimaxH3Error(payload);
-    if (status === 'completed') {
+    const hasTerminalError = isMinimaxH3TerminalStatus(status) || isMinimaxH3FailureMessage(errorMessage);
+
+    if (hasTerminalError) {
+      logWarn('[Video Adapter] Minimax H3 terminal error message detected:', {
+        taskId,
+        status,
+        errorMessage,
+        payload: stringifyMinimaxH3PayloadSnippet(payload),
+      });
+      throw new Error(errorMessage || 'Minimax H3 generation failed');
+    }
+
+    if (isMinimaxH3CompletedStatus(status)) {
       onProgress?.(95);
       const videoUrl = extractMinimaxH3VideoUrl(payload, baseUrl);
       return videoUrl || downloadMinimaxH3Content(baseUrl, apiKey, taskId);
     }
 
-    if (status === 'failed' || status === 'error') {
-      throw new Error(errorMessage || 'Minimax H3 generation failed');
-    }
-
-    if (isMinimaxH3FailureMessage(errorMessage)) {
-      logWarn('[Video Adapter] Minimax H3 terminal error message detected:', {
-        taskId,
-        status,
-        errorMessage,
-      });
-      throw new Error(errorMessage || 'Minimax H3 generation failed');
+    if (!isMinimaxH3ActiveStatus(status)) {
+      const signature = `${status}:${stringifyMinimaxH3PayloadSnippet(payload, 240)}`;
+      if (!loggedPollSignatures.has(signature)) {
+        loggedPollSignatures.add(signature);
+        logWarn('[Video Adapter] Minimax H3 unexpected poll status:', {
+          taskId,
+          status,
+          errorMessage,
+          payload: stringifyMinimaxH3PayloadSnippet(payload),
+        });
+      }
+    } else if (status === 'unknown') {
+      const signature = `${status}:${stringifyMinimaxH3PayloadSnippet(payload, 240)}`;
+      if (!loggedPollSignatures.has(signature)) {
+        loggedPollSignatures.add(signature);
+        logWarn('[Video Adapter] Minimax H3 poll response without status:', {
+          taskId,
+          errorMessage,
+          payload: stringifyMinimaxH3PayloadSnippet(payload),
+        });
+      }
     }
 
     const elapsedRatio = Math.min(1, (Date.now() - startedAt) / MINIMAX_H3_MAX_WAIT_MS);
