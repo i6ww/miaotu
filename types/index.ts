@@ -114,6 +114,8 @@ export interface GenerationParams {
   clientRequestId?: string;
   referenceVideoUrls?: string[];
   referenceAudioUrls?: string[];
+  referenceImageCount?: number;
+  referenceImageExtraCost?: number;
   batchId?: string;
   batchName?: string;
   batchIndex?: number;

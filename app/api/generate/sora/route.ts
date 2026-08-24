@@ -2,7 +2,12 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth';
-import { generateWithSora, resolveVideoGenerationCost } from '@/lib/sora';
+import {
+  countMinimaxH3ReferenceImages,
+  generateWithSora,
+  resolveMinimaxH3ReferenceImageExtraCost,
+  resolveVideoGenerationCost,
+} from '@/lib/sora';
 import { saveGeneration, updateUserBalance, getUserById, updateGeneration, getSystemConfig, refundGenerationBalance, getVideoModelWithChannel } from '@/lib/db';
 import type { Generation, SoraGenerateRequest } from '@/types';
 import { checkRateLimit } from '@/lib/rate-limit';
@@ -454,15 +459,22 @@ export async function POST(request: NextRequest) {
         mimeType: referenceImage.mimeType,
         data: referenceImage.base64,
       });
+      normalizedBody.referenceImageUrl = undefined;
     }
 
-    if (selectedChannelType === 'minimax-h3') {
-      const referenceImageCount = (normalizedBody.files || []).filter(
-        (file) => file.mimeType.startsWith('image/')
-      ).length;
-      const totalReferenceCount = referenceImageCount + referenceVideoUrls.length + referenceAudioUrls.length;
+    const minimaxReferenceImageCount =
+      selectedChannelType === 'minimax-h3'
+        ? countMinimaxH3ReferenceImages(normalizedBody)
+        : 0;
+    const minimaxReferenceImageExtraCost =
+      selectedChannelType === 'minimax-h3'
+        ? resolveMinimaxH3ReferenceImageExtraCost(minimaxReferenceImageCount)
+        : 0;
 
-      if (referenceImageCount > MAX_MINIMAX_REFERENCE_IMAGES) {
+    if (selectedChannelType === 'minimax-h3') {
+      const totalReferenceCount = minimaxReferenceImageCount + referenceVideoUrls.length + referenceAudioUrls.length;
+
+      if (minimaxReferenceImageCount > MAX_MINIMAX_REFERENCE_IMAGES) {
         return NextResponse.json(
           { error: `参考图片最多 ${MAX_MINIMAX_REFERENCE_IMAGES} 张` },
           { status: 400 }
@@ -551,6 +563,8 @@ export async function POST(request: NextRequest) {
           videoConfigObject: normalizedVideoConfigObject,
           referenceVideoUrls,
           referenceAudioUrls,
+          referenceImageCount: minimaxReferenceImageCount,
+          referenceImageExtraCost: minimaxReferenceImageExtraCost,
           progress: 0,
         },
         resultUrl: '',

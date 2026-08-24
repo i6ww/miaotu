@@ -74,6 +74,8 @@ const MINIMAX_H3_REFERENCE_IMAGE_LIMIT = 9;
 const MINIMAX_H3_REFERENCE_VIDEO_LIMIT = 3;
 const MINIMAX_H3_REFERENCE_AUDIO_LIMIT = 3;
 const MINIMAX_H3_TOTAL_REFERENCE_LIMIT = 12;
+export const MINIMAX_H3_FREE_REFERENCE_IMAGE_COUNT = 5;
+export const MINIMAX_H3_EXTRA_REFERENCE_IMAGE_COST = 10;
 
 const MINIMAX_H3_SIZES = {
   '768p': {
@@ -1426,24 +1428,54 @@ function resolveModelDurationCost(model: VideoModel, request: SoraGenerateReques
   return null;
 }
 
+function isMinimaxH3PricingContext(request: SoraGenerateRequest, model?: VideoModel): boolean {
+  const candidates = [
+    model?.apiModel,
+    model?.name,
+    request.model,
+  ];
+
+  return candidates.some((candidate) => String(candidate || '').toLowerCase().includes('minimax_h3'));
+}
+
+export function countMinimaxH3ReferenceImages(request: SoraGenerateRequest): number {
+  const fileImageCount = (request.files || []).filter((file) => file.mimeType.startsWith('image/')).length;
+  const directReferenceCount = request.referenceImageUrl?.trim() ? 1 : 0;
+  return fileImageCount + directReferenceCount;
+}
+
+export function resolveMinimaxH3ReferenceImageExtraCost(referenceImageCount: number): number {
+  const extraImages = Math.max(0, referenceImageCount - MINIMAX_H3_FREE_REFERENCE_IMAGE_COUNT);
+  return extraImages * MINIMAX_H3_EXTRA_REFERENCE_IMAGE_COST;
+}
+
 export function resolveVideoGenerationCost(
   pricing: { soraVideo10s: number; soraVideo15s: number; soraVideo25s: number },
   request: SoraGenerateRequest,
   model?: VideoModel
 ): number {
   const modelCost = model ? resolveModelDurationCost(model, request) : null;
-  if (modelCost !== null) return modelCost;
+  let baseCost: number;
+  if (modelCost !== null) {
+    baseCost = modelCost;
+  } else {
+    const durationHint = `${request.duration || ''} ${request.model || ''}`.toLowerCase();
+    const requestedSeconds = resolveRequestedVideoLengthSeconds(request, model);
 
-  const durationHint = `${request.duration || ''} ${request.model || ''}`.toLowerCase();
-  const requestedSeconds = resolveRequestedVideoLengthSeconds(request, model);
+    if (durationHint.includes('25') || requestedSeconds >= 25) {
+      baseCost = pricing.soraVideo25s;
+    } else if (durationHint.includes('15') || requestedSeconds >= 15) {
+      baseCost = pricing.soraVideo15s;
+    } else {
+      baseCost = pricing.soraVideo10s;
+    }
+  }
 
-  if (durationHint.includes('25') || requestedSeconds >= 25) {
-    return pricing.soraVideo25s;
+  if (!isMinimaxH3PricingContext(request, model)) {
+    return baseCost;
   }
-  if (durationHint.includes('15') || requestedSeconds >= 15) {
-    return pricing.soraVideo15s;
-  }
-  return pricing.soraVideo10s;
+
+  return baseCost + resolveMinimaxH3ReferenceImageExtraCost(countMinimaxH3ReferenceImages(request));
 }
 function getTypeAndCost(
   model: string,

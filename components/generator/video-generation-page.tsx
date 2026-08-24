@@ -62,6 +62,8 @@ const MINIMAX_H3_MAX_REFERENCE_VIDEOS = 3;
 const MINIMAX_H3_MAX_REFERENCE_AUDIOS = 3;
 const MINIMAX_H3_MAX_REFERENCE_IMAGES = 9;
 const MINIMAX_H3_MAX_TOTAL_REFERENCES = 12;
+const MINIMAX_H3_FREE_REFERENCE_IMAGES = 5;
+const MINIMAX_H3_EXTRA_REFERENCE_IMAGE_COST = 10;
 const MINIMAX_H3_MAX_REFERENCE_VIDEO_BYTES = 200 * 1024 * 1024;
 const MINIMAX_H3_MAX_REFERENCE_AUDIO_BYTES = 50 * 1024 * 1024;
 const MINIMAX_H3_REFERENCE_AUDIO_MIN_SECONDS = 2;
@@ -269,6 +271,16 @@ export function VideoGenerationView({
     [referenceAudioUrlsText]
   );
   const canMentionCharacterCards = isSoraChannel && characterCards.length > 0;
+  const referenceImageCount = files.length + (activeExternalReference ? 1 : 0);
+  const selectedDurationCost = useMemo(() => {
+    if (!currentModel) return 0;
+    const exactDuration = currentModel.durations.find((item) => item.value === duration);
+    return exactDuration?.cost || currentModel.durations[0]?.cost || 0;
+  }, [currentModel, duration]);
+  const referenceImageExtraCost = isMinimaxH3Channel
+    ? Math.max(0, referenceImageCount - MINIMAX_H3_FREE_REFERENCE_IMAGES) * MINIMAX_H3_EXTRA_REFERENCE_IMAGE_COST
+    : 0;
+  const estimatedVideoCost = selectedDurationCost + referenceImageExtraCost;
 
   const modelsCacheRef = useRef<SafeVideoModel[] | null>(null);
 
@@ -1461,6 +1473,15 @@ export function VideoGenerationView({
 
             {/* Right Action Group */}
             <div className="flex items-center gap-2 shrink-0 justify-end w-full lg:w-auto">
+              {currentModel && (
+                <div className="hidden sm:flex h-9 items-center gap-1.5 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 text-xs font-medium text-amber-100">
+                  <span>预计 {estimatedVideoCost} 积分</span>
+                  {referenceImageExtraCost > 0 && (
+                    <span className="text-amber-200/70">+{referenceImageExtraCost}</span>
+                  )}
+                </div>
+              )}
+
               {/* 抽卡按钮 */}
               {siteConfig.gachaEnabled && (
                 <button
