@@ -10,6 +10,9 @@ import {
   AlertCircle,
   Dices,
   User,
+  Film,
+  Music,
+  Upload,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { compressImageToWebP, fileToBase64 } from '@/lib/image-compression';
@@ -55,6 +58,102 @@ interface DailyUsage {
   characterCardCount: number;
 }
 
+const MINIMAX_H3_MAX_REFERENCE_VIDEOS = 3;
+const MINIMAX_H3_MAX_REFERENCE_AUDIOS = 3;
+const MINIMAX_H3_MAX_REFERENCE_IMAGES = 9;
+const MINIMAX_H3_MAX_TOTAL_REFERENCES = 12;
+const MINIMAX_H3_MAX_REFERENCE_VIDEO_BYTES = 200 * 1024 * 1024;
+const MINIMAX_H3_MAX_REFERENCE_AUDIO_BYTES = 50 * 1024 * 1024;
+const MINIMAX_H3_REFERENCE_AUDIO_MIN_SECONDS = 2;
+const MINIMAX_H3_REFERENCE_AUDIO_MAX_SECONDS = 15;
+const MINIMAX_H3_REFERENCE_VIDEO_MIN_SECONDS = 2;
+const MINIMAX_H3_REFERENCE_VIDEO_MAX_SECONDS = 15;
+
+type ReferenceMediaKind = 'video' | 'audio';
+
+function parseReferenceUrlText(value: string): string[] {
+  const urls = value
+    .split(/[\n,，\s]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+  return Array.from(new Set(urls));
+}
+
+function isPublicReferenceUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    const hostname = url.hostname.toLowerCase();
+    const isPublicProtocol = url.protocol === 'http:' || url.protocol === 'https:';
+    const hasAllowedPort = !url.port || url.port === '80' || url.port === '443';
+    return isPublicProtocol && hasAllowedPort && hostname !== 'localhost' && !hostname.endsWith('.localhost');
+  } catch {
+    return false;
+  }
+}
+
+function appendReferenceUrlText(value: string, url: string): string {
+  const urls = parseReferenceUrlText(value);
+  if (!urls.includes(url)) {
+    urls.push(url);
+  }
+  return urls.join('\n');
+}
+
+function isReferenceMediaFile(file: File, kind: ReferenceMediaKind): boolean {
+  const mimeType = file.type.toLowerCase();
+  if (kind === 'audio') return mimeType.startsWith('audio/');
+  return (
+    mimeType.startsWith('video/') ||
+    mimeType === 'application/x-mpegurl' ||
+    mimeType === 'application/vnd.apple.mpegurl'
+  );
+}
+
+function readBrowserMediaDurationSeconds(file: File, kind: ReferenceMediaKind): Promise<number | null> {
+  return new Promise((resolve) => {
+    const media = document.createElement(kind);
+    const objectUrl = URL.createObjectURL(file);
+    let settled = false;
+
+    const cleanup = () => {
+      window.clearTimeout(timeoutId);
+      media.removeAttribute('src');
+      media.load();
+      URL.revokeObjectURL(objectUrl);
+    };
+
+    const finish = (duration: number | null) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(duration);
+    };
+
+    const timeoutId = window.setTimeout(() => finish(null), 10000);
+    media.preload = 'metadata';
+    media.onloadedmetadata = () => {
+      const duration = media.duration;
+      finish(Number.isFinite(duration) && duration > 0 ? duration : null);
+    };
+    media.onerror = () => finish(null);
+    media.src = objectUrl;
+  });
+}
+
+function getReferenceMediaDurationLimit(kind: ReferenceMediaKind): { min: number; max: number } {
+  return kind === 'video'
+    ? { min: MINIMAX_H3_REFERENCE_VIDEO_MIN_SECONDS, max: MINIMAX_H3_REFERENCE_VIDEO_MAX_SECONDS }
+    : { min: MINIMAX_H3_REFERENCE_AUDIO_MIN_SECONDS, max: MINIMAX_H3_REFERENCE_AUDIO_MAX_SECONDS };
+}
+
+function isMinimaxH3ReferenceMediaDurationValid(kind: ReferenceMediaKind, durationSeconds: number): boolean {
+  const limit = getReferenceMediaDurationLimit(kind);
+  return (
+    durationSeconds >= limit.min &&
+    durationSeconds <= limit.max
+  );
+}
+
 export interface VideoGenerationPageProps {
   embedded?: boolean;
   createModeSwitcher?: ReactNode;
@@ -74,6 +173,8 @@ export function VideoGenerationView({
   const siteConfig = useSiteConfig();
   const abortControllersRef = useRef<Map<string, AbortController>>(new Map());
   const filesRef = useRef<Array<{ file: File; preview: string }>>([]);
+  const referenceVideoFileInputRef = useRef<HTMLInputElement>(null);
+  const referenceAudioFileInputRef = useRef<HTMLInputElement>(null);
   const refreshGenerationFeedRef = useRef<() => Promise<void>>(async () => {});
   const deletedGenerationIdsRef = useRef<Set<string>>(new Set());
   const isActiveRef = useRef(isActive);
@@ -97,6 +198,9 @@ export function VideoGenerationView({
   const [duration, setDuration] = useState<string>('8s');
   const [prompt, setPrompt] = useState('');
   const [files, setFiles] = useState<Array<{ file: File; preview: string }>>([]);
+  const [referenceVideoUrlsText, setReferenceVideoUrlsText] = useState('');
+  const [referenceAudioUrlsText, setReferenceAudioUrlsText] = useState('');
+  const [uploadingReferenceKind, setUploadingReferenceKind] = useState<ReferenceMediaKind | null>(null);
   const [compressing, setCompressing] = useState(false);
   const [compressedCache, setCompressedCache] = useState<Map<File, string>>(new Map());
 
@@ -155,6 +259,15 @@ export function VideoGenerationView({
     return availableModels.find(m => m.id === selectedModelId) || availableModels[0];
   }, [availableModels, selectedModelId]);
   const isSoraChannel = currentModel?.channelType === 'sora';
+  const isMinimaxH3Channel = currentModel?.channelType === 'minimax-h3';
+  const referenceVideoUrls = useMemo(
+    () => parseReferenceUrlText(referenceVideoUrlsText),
+    [referenceVideoUrlsText]
+  );
+  const referenceAudioUrls = useMemo(
+    () => parseReferenceUrlText(referenceAudioUrlsText),
+    [referenceAudioUrlsText]
+  );
   const canMentionCharacterCards = isSoraChannel && characterCards.length > 0;
 
   const modelsCacheRef = useRef<SafeVideoModel[] | null>(null);
@@ -233,6 +346,10 @@ export function VideoGenerationView({
       }
       if (!model.features.imageToVideo && activeExternalReference) {
         setActiveExternalReference(null);
+      }
+      if (model.channelType !== 'minimax-h3') {
+        setReferenceVideoUrlsText('');
+        setReferenceAudioUrlsText('');
       }
     }
   }, [selectedModelId, availableModels, activeExternalReference, clearFiles, files.length, setActiveExternalReference]);
@@ -329,6 +446,126 @@ export function VideoGenerationView({
       }
     },
     [activeExternalReference, setActiveExternalReference]
+  );
+
+  const uploadReferenceMediaFile = useCallback(
+    async (file: File, kind: ReferenceMediaKind): Promise<string> => {
+      const formData = new FormData();
+      formData.append('kind', kind);
+      formData.append('file', file);
+
+      const response = await fetch('/api/generate/sora/reference-media', {
+        method: 'POST',
+        body: formData,
+      });
+      const payload = await response.json();
+
+      if (!response.ok) {
+        throw new Error(payload.error || '参考素材上传失败');
+      }
+
+      const url = payload.data?.url;
+      if (typeof url !== 'string' || !url.trim()) {
+        throw new Error('参考素材上传成功但没有返回可用 URL');
+      }
+
+      return url.trim();
+    },
+    []
+  );
+
+  const handleAddReferenceMediaFiles = useCallback(
+    async (selectedFiles: File[], kind: ReferenceMediaKind) => {
+      if (!isMinimaxH3Channel) return;
+
+      const existingCount = kind === 'video' ? referenceVideoUrls.length : referenceAudioUrls.length;
+      const maxCount = kind === 'video' ? MINIMAX_H3_MAX_REFERENCE_VIDEOS : MINIMAX_H3_MAX_REFERENCE_AUDIOS;
+      const maxBytes = kind === 'video' ? MINIMAX_H3_MAX_REFERENCE_VIDEO_BYTES : MINIMAX_H3_MAX_REFERENCE_AUDIO_BYTES;
+      const referenceImageCount = files.length + (activeExternalReference ? 1 : 0);
+      const totalReferenceCount = referenceImageCount + referenceVideoUrls.length + referenceAudioUrls.length;
+      const acceptedFiles = selectedFiles.filter((file) => isReferenceMediaFile(file, kind));
+
+      if (acceptedFiles.length === 0) {
+        setError(kind === 'video' ? '请选择视频文件' : '请选择音频文件');
+        return;
+      }
+
+      const oversizedFile = acceptedFiles.find((file) => file.size > maxBytes);
+      if (oversizedFile) {
+        setError(kind === 'video' ? '参考视频大小不能超过 200MB' : '参考音频大小不能超过 50MB');
+        return;
+      }
+
+      const availableSlots = Math.max(0, maxCount - existingCount);
+      const totalAvailableSlots = Math.max(0, MINIMAX_H3_MAX_TOTAL_REFERENCES - totalReferenceCount);
+      const nextAvailableSlots = Math.min(availableSlots, totalAvailableSlots);
+      if (nextAvailableSlots <= 0) {
+        const countError =
+          kind === 'video' ? `参考视频最多 ${maxCount} 条` : `参考音频最多 ${maxCount} 条`;
+        setError(availableSlots <= 0 ? countError : `参考素材合计最多 ${MINIMAX_H3_MAX_TOTAL_REFERENCES} 个`);
+        return;
+      }
+
+      const uploadFiles = acceptedFiles.slice(0, nextAvailableSlots);
+      for (const file of uploadFiles) {
+        const durationSeconds = await readBrowserMediaDurationSeconds(file, kind);
+        if (durationSeconds !== null && !isMinimaxH3ReferenceMediaDurationValid(kind, durationSeconds)) {
+          const limit = getReferenceMediaDurationLimit(kind);
+          const kindName = kind === 'video' ? '视频' : '音频';
+          const message = `参考${kindName}时长需在 ${limit.min}～${limit.max} 秒之间，当前检测为 ${durationSeconds.toFixed(2)} 秒。`;
+          setError(message);
+          toast({
+            title: `参考${kindName}时长不符合要求`,
+            description: message,
+            variant: 'destructive',
+          });
+          return;
+        }
+      }
+
+      setError('');
+      setUploadingReferenceKind(kind);
+
+      try {
+        const uploadedUrls: string[] = [];
+        for (const file of uploadFiles) {
+          uploadedUrls.push(await uploadReferenceMediaFile(file, kind));
+        }
+
+        if (kind === 'video') {
+          setReferenceVideoUrlsText((prev) =>
+            uploadedUrls.reduce((next, url) => appendReferenceUrlText(next, url), prev)
+          );
+        } else {
+          setReferenceAudioUrlsText((prev) =>
+            uploadedUrls.reduce((next, url) => appendReferenceUrlText(next, url), prev)
+          );
+        }
+
+        toast({
+          title: kind === 'video' ? '参考视频已上传' : '参考音频已上传',
+          description: `已添加 ${uploadedUrls.length} 条公网 URL`,
+        });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : '参考素材上传失败';
+        setError(message);
+        toast({
+          title: '参考素材上传失败',
+          description: message,
+          variant: 'destructive',
+        });
+      } finally {
+        setUploadingReferenceKind(null);
+      }
+    },
+    [
+      isMinimaxH3Channel,
+      activeExternalReference,
+      files.length,
+      referenceAudioUrls.length,
+      referenceVideoUrls.length,
+      uploadReferenceMediaFile,
+    ]
   );
 
   const handleRemoveReferenceImage = useCallback((index: number) => {
@@ -666,7 +903,7 @@ export function VideoGenerationView({
         const cached = nextCache.get(file);
         if (cached) {
           results.push({
-            mimeType: 'image/webp',
+            mimeType: isMinimaxH3Channel ? 'image/jpeg' : 'image/webp',
             data: cached,
           });
           continue;
@@ -677,7 +914,7 @@ export function VideoGenerationView({
           const base64 = await fileToBase64(compressedFile);
           nextCache.set(file, base64);
           results.push({
-            mimeType: 'image/webp',
+            mimeType: isMinimaxH3Channel ? 'image/jpeg' : (compressedFile.type || 'image/webp'),
             data: base64,
           });
         } catch {
@@ -701,14 +938,47 @@ export function VideoGenerationView({
   // 验证输入
   const validateInput = (): string | null => {
     if (!currentModel) return '请选择模型';
+    if (uploadingReferenceKind) return '参考素材正在上传，请稍后提交';
+    const invalidReferenceVideoUrl = referenceVideoUrls.find((url) => !isPublicReferenceUrl(url));
+    const invalidReferenceAudioUrl = referenceAudioUrls.find((url) => !isPublicReferenceUrl(url));
+    const referenceImageCount = files.length + (activeExternalReference ? 1 : 0);
+    const totalReferenceCount = referenceImageCount + referenceVideoUrls.length + referenceAudioUrls.length;
+
     // 检查每日限制
     if (isVideoLimitReached) {
       return `今日视频生成次数已达上限 (${dailyLimits.videoLimit} 次)`;
     }
+    if (!isMinimaxH3Channel && (referenceVideoUrls.length > 0 || referenceAudioUrls.length > 0)) {
+      return '当前模型不支持视频或音频参考';
+    }
+    if (isMinimaxH3Channel && referenceVideoUrls.length > MINIMAX_H3_MAX_REFERENCE_VIDEOS) {
+      return `参考视频最多 ${MINIMAX_H3_MAX_REFERENCE_VIDEOS} 条`;
+    }
+    if (isMinimaxH3Channel && referenceAudioUrls.length > MINIMAX_H3_MAX_REFERENCE_AUDIOS) {
+      return `参考音频最多 ${MINIMAX_H3_MAX_REFERENCE_AUDIOS} 条`;
+    }
+    if (isMinimaxH3Channel && referenceImageCount > MINIMAX_H3_MAX_REFERENCE_IMAGES) {
+      return `参考图片最多 ${MINIMAX_H3_MAX_REFERENCE_IMAGES} 张`;
+    }
+    if (isMinimaxH3Channel && totalReferenceCount > MINIMAX_H3_MAX_TOTAL_REFERENCES) {
+      return `参考素材合计最多 ${MINIMAX_H3_MAX_TOTAL_REFERENCES} 个`;
+    }
+    if (isMinimaxH3Channel && invalidReferenceVideoUrl) {
+      return `参考视频 URL 无效: ${invalidReferenceVideoUrl}`;
+    }
+    if (isMinimaxH3Channel && invalidReferenceAudioUrl) {
+      return `参考音频 URL 无效: ${invalidReferenceAudioUrl}`;
+    }
     if (activeExternalReference && !currentModel.features.imageToVideo) {
       return '当前模型不支持参考图，请切换支持图生视频的模型';
     }
-    if (!prompt.trim() && files.length === 0 && !activeExternalReference) {
+    if (
+      !prompt.trim() &&
+      files.length === 0 &&
+      !activeExternalReference &&
+      referenceVideoUrls.length === 0 &&
+      referenceAudioUrls.length === 0
+    ) {
       return '请输入提示词或上传参考素材';
     }
     // 检测中文（暂时禁用）
@@ -733,6 +1003,8 @@ export function VideoGenerationView({
       duration: string;
       files: { mimeType: string; data: string }[];
       referenceImageUrl?: string;
+      referenceVideoUrls?: string[];
+      referenceAudioUrls?: string[];
     }
   ) => {
     const fallbackModel = buildModelId(config.aspectRatio, config.duration);
@@ -747,6 +1019,8 @@ export function VideoGenerationView({
         prompt: taskPrompt,
         files: config.files,
         referenceImageUrl: config.referenceImageUrl,
+        referenceVideoUrls: config.referenceVideoUrls,
+        referenceAudioUrls: config.referenceAudioUrls,
       }),
     });
 
@@ -795,6 +1069,8 @@ export function VideoGenerationView({
         duration,
         files: taskFiles,
         referenceImageUrl: activeExternalReference?.sourceUrl,
+        referenceVideoUrls,
+        referenceAudioUrls,
       });
 
       toast({
@@ -810,6 +1086,8 @@ export function VideoGenerationView({
         setPrompt('');
         clearFiles();
         setActiveExternalReference(null);
+        setReferenceVideoUrlsText('');
+        setReferenceAudioUrlsText('');
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : '生成失败');
@@ -846,6 +1124,8 @@ export function VideoGenerationView({
             duration,
             files: taskFiles,
             referenceImageUrl: activeExternalReference?.sourceUrl,
+            referenceVideoUrls,
+            referenceAudioUrls,
           })
         )
       );
@@ -876,6 +1156,8 @@ export function VideoGenerationView({
         setPrompt('');
         clearFiles();
         setActiveExternalReference(null);
+        setReferenceVideoUrlsText('');
+        setReferenceAudioUrlsText('');
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : '生成失败');
@@ -1028,6 +1310,89 @@ export function VideoGenerationView({
 
             </div>
           </div>
+
+          {isMinimaxH3Channel && (
+            <div className="mb-4 grid grid-cols-1 gap-3 lg:grid-cols-2">
+              <div className="space-y-1.5">
+                <input
+                  ref={referenceVideoFileInputRef}
+                  type="file"
+                  accept="video/mp4,video/quicktime,video/webm,video/x-matroska,video/mkv,application/x-mpegurl,application/vnd.apple.mpegurl"
+                  multiple
+                  className="hidden"
+                  onChange={(event) => {
+                    const selectedFiles = Array.from(event.target.files || []);
+                    event.target.value = '';
+                    void handleAddReferenceMediaFiles(selectedFiles, 'video');
+                  }}
+                />
+                <div className="flex items-center justify-between gap-2">
+                  <label className="flex items-center gap-1.5 text-xs font-medium text-foreground/60">
+                    <Film className="h-3.5 w-3.5" />
+                    参考视频 URL
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => referenceVideoFileInputRef.current?.click()}
+                    disabled={uploadingReferenceKind !== null}
+                    className="inline-flex h-7 items-center gap-1.5 rounded-md border border-border/70 bg-card/60 px-2 text-xs text-foreground/70 transition-colors hover:bg-background disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {uploadingReferenceKind === 'video' ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <Upload className="h-3.5 w-3.5" />
+                    )}
+                    上传
+                  </button>
+                </div>
+                <textarea
+                  value={referenceVideoUrlsText}
+                  onChange={(e) => setReferenceVideoUrlsText(e.target.value)}
+                  placeholder="https://example.com/reference.mp4"
+                  className="h-16 w-full resize-none rounded-lg border border-border/70 bg-input/70 px-3 py-2 text-xs text-foreground placeholder:text-foreground/30 focus:border-border focus:outline-none focus:ring-2 focus:ring-ring/30"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <input
+                  ref={referenceAudioFileInputRef}
+                  type="file"
+                  accept="audio/mpeg,audio/mp3,audio/wav,audio/x-wav,audio/aac,audio/ogg,audio/webm,audio/mp4"
+                  multiple
+                  className="hidden"
+                  onChange={(event) => {
+                    const selectedFiles = Array.from(event.target.files || []);
+                    event.target.value = '';
+                    void handleAddReferenceMediaFiles(selectedFiles, 'audio');
+                  }}
+                />
+                <div className="flex items-center justify-between gap-2">
+                  <label className="flex items-center gap-1.5 text-xs font-medium text-foreground/60">
+                    <Music className="h-3.5 w-3.5" />
+                    参考音频 URL
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => referenceAudioFileInputRef.current?.click()}
+                    disabled={uploadingReferenceKind !== null}
+                    className="inline-flex h-7 items-center gap-1.5 rounded-md border border-border/70 bg-card/60 px-2 text-xs text-foreground/70 transition-colors hover:bg-background disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {uploadingReferenceKind === 'audio' ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <Upload className="h-3.5 w-3.5" />
+                    )}
+                    上传
+                  </button>
+                </div>
+                <textarea
+                  value={referenceAudioUrlsText}
+                  onChange={(e) => setReferenceAudioUrlsText(e.target.value)}
+                  placeholder="https://example.com/reference.mp3"
+                  className="h-16 w-full resize-none rounded-lg border border-border/70 bg-input/70 px-3 py-2 text-xs text-foreground placeholder:text-foreground/30 focus:border-border focus:outline-none focus:ring-2 focus:ring-ring/30"
+                />
+              </div>
+            </div>
+          )}
 
           {/* 参数行：选择器 + 按钮 */}
           <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between w-full">

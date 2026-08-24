@@ -600,7 +600,7 @@ export function ImageGenerationPage({
         return;
       }
 
-      router.push(`/create?mode=${target}&referenceId=${encodeURIComponent(generation.id)}`);
+      router.push(`/${target}?referenceId=${encodeURIComponent(generation.id)}`);
     },
     [onReuseGeneration, router]
   );

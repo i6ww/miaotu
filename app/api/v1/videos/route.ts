@@ -3,7 +3,7 @@ import { createVideoTask, generateVideo, type VideoGenerationRequest, type Video
 import { buildErrorResponse, extractBearerToken, isAuthorized, parseDataUrl } from '@/lib/v1';
 import { processVideoPrompt } from '@/lib/prompt-processor';
 import { assertPromptsAllowed } from '@/lib/prompt-blocklist';
-import { saveMediaAsync } from '@/lib/media-storage';
+import { saveVideoMediaPreferS3 } from '@/lib/media-storage';
 
 export const dynamic = 'force-dynamic';
 
@@ -166,7 +166,7 @@ export async function POST(request: NextRequest) {
     const origin = new URL(request.url).origin;
     const firstUrl = result.data?.[0]?.url;
     if (firstUrl) {
-      result.data[0].url = await saveMediaAsync(`v1-video-${result.id}`, firstUrl, { publicBaseUrl: origin });
+      result.data[0].url = await saveVideoMediaPreferS3(`v1-video-${result.id}`, firstUrl, { publicBaseUrl: origin });
     }
     const response = buildSyncResponse(processedRequest, result);
     return NextResponse.json(response);

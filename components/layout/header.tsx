@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { signOut } from 'next-auth/react';
-import { LogOut, History, Shield, LayoutGrid, Sparkles, User, Workflow, Images, CreditCard, MessageSquare } from 'lucide-react';
+import { LogOut, History, Shield, LayoutGrid, Sparkles, User, Workflow, Images, CreditCard, MessageSquare, Video } from 'lucide-react';
 import type { SafeUser } from '@/types';
 import { cn } from '@/lib/utils';
 import { useSiteConfig } from '@/components/providers/site-config-provider';
@@ -15,13 +15,14 @@ interface HeaderProps {
 
 // 移动端底部导航项
 const mobileNavItems = [
-  { href: '/create', icon: Sparkles, label: '创作' },
+  { href: '/image', icon: Sparkles, label: '图片' },
   { href: '/batch-image', icon: Images, label: '\u6279\u91cf' },
+  { href: '/video', icon: Video, label: '视频' },
   { href: '/chat', icon: MessageSquare, label: '\u804a\u5929' },
   { href: '/workspace', icon: Workflow, label: '工作流' },
   { href: '/square', icon: LayoutGrid, label: '广场' },
   { href: '/history', icon: History, label: '历史' },
-  { href: '/recharge', icon: CreditCard, label: '充值' },
+  { href: '/recharge', icon: CreditCard, label: '充兑' },
   { href: '/settings', icon: User, label: '我的' },
 ];
 
@@ -82,9 +83,9 @@ export function Header({ user }: HeaderProps) {
       <div className="lg:hidden fixed bottom-5 left-0 right-0 z-50 px-4 flex justify-center">
         <nav className="w-full max-w-sm bg-card/80 border border-border/80 rounded-2xl shadow-[0_8px_32px_rgba(0,0,0,0.55),0_1px_0_rgba(255,255,255,0.08)] backdrop-blur-2xl px-2 py-1.5 flex justify-around items-center">
           {visibleMobileNavItems.map((item) => {
-            const isCreateEntry = item.href === '/create';
-            const isActive = isCreateEntry
-              ? pathname === '/create' || pathname === '/image' || pathname === '/video'
+            const isImageEntry = item.href === '/image';
+            const isActive = isImageEntry
+              ? pathname === '/image' || pathname === '/create'
               : pathname === item.href || (item.href !== '/' && pathname.startsWith(item.href));
             return (
               <Link

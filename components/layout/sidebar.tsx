@@ -14,6 +14,7 @@ import {
   Images,
   CreditCard,
   MessageSquare,
+  Video,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { SafeUser } from '@/types';
@@ -35,14 +36,15 @@ function formatRelativeTime(timestamp: number | null): string {
 }
 
 const navItems = [
-  { href: '/create', icon: Sparkles, label: '创作', description: '图片 / 视频统一入口', badge: 'AI', isAI: true },
+  { href: '/image', icon: Sparkles, label: '图片创作', description: '文生图 / 图生图', badge: 'AI', isAI: true },
   { href: '/batch-image', icon: Images, label: '\u6279\u91cf\u751f\u56fe', description: '\u591a\u63d0\u793a\u8bcd / \u591a\u53c2\u8003\u56fe', badge: 'BATCH', isAI: true },
+  { href: '/video', icon: Video, label: '视频创作', description: '文生视频 / 图生视频', badge: 'VIDEO', isAI: true },
   { href: '/chat', icon: MessageSquare, label: '\u5bf9\u8bdd\u804a\u5929', description: '\u63a8\u7406\u5927\u6a21\u578b', badge: 'CHAT', isAI: true },
   { href: '/workspace', icon: Workflow, label: '工作空间', description: '可视化工作流画布', badge: null, isAI: true },
   { href: '/video/character-card', icon: User, label: '角色卡生成', description: '从视频提取角色', badge: 'NEW', isAI: true },
   { href: '/square', icon: LayoutGrid, label: '广场', description: '探索社区创作', badge: 'HOT', isAI: false },
   { href: '/history', icon: History, label: '历史', description: '作品记录', badge: null, isAI: false },
-  { href: '/recharge', icon: CreditCard, label: '在线充值', description: '积分充值', badge: null, isAI: false },
+  { href: '/recharge', icon: CreditCard, label: '充值和兑换', description: '积分充值 / 兑换', badge: null, isAI: false },
   { href: '/settings', icon: Settings, label: '设置', description: '账号管理', badge: null, isAI: false },
 ];
 
@@ -89,9 +91,9 @@ export function Sidebar({ user }: SidebarProps) {
           创作工具
         </p>
         {visibleNavItems.map((item) => {
-          const isCreateEntry = item.href === '/create';
-          const isActive = isCreateEntry
-            ? pathname === '/create' || pathname === '/image' || pathname === '/video'
+          const isImageEntry = item.href === '/image';
+          const isActive = isImageEntry
+            ? pathname === '/image' || pathname === '/create'
             : pathname === item.href || pathname.startsWith(`${item.href}/`);
           return (
             <Link

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { History, Trash2, Search, Loader2, Eye } from 'lucide-react';
 import { formatDate, cn } from '@/lib/utils';
 import { IMAGE_MODELS } from '@/lib/model-config';
@@ -77,10 +77,16 @@ export default function GenerationsPage() {
   const [search, setSearch] = useState('');
   const [typeFilter, setTypeFilter] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
+  const hasLoadedRecordsRef = useRef(false);
+  const latestRecordsRequestRef = useRef(0);
 
   const loadRecords = useCallback(async (nextPage = 1, reset = false) => {
+    const requestId = latestRecordsRequestRef.current + 1;
+    latestRecordsRequestRef.current = requestId;
+    const shouldShowInitialLoading = reset && !hasLoadedRecordsRef.current;
+
     try {
-      if (reset) {
+      if (shouldShowInitialLoading) {
         setLoading(true);
       } else {
         setFetching(true);
@@ -96,9 +102,14 @@ export default function GenerationsPage() {
       const res = await fetch(`/api/admin/generations?${params.toString()}`);
       if (res.ok) {
         const data = await res.json();
+        if (requestId !== latestRecordsRequestRef.current) {
+          return;
+        }
+
         setRecords(data.data || []);
         setPage(data.page || nextPage);
         setTotal(data.total || 0);
+        hasLoadedRecordsRef.current = true;
       } else {
         const data = await res.json().catch(() => ({}));
         toast({ title: '加载失败', description: data.error || '无法获取生成记录', variant: 'destructive' });
@@ -106,8 +117,10 @@ export default function GenerationsPage() {
     } catch (err) {
       toast({ title: '加载失败', description: err instanceof Error ? err.message : '无法获取生成记录', variant: 'destructive' });
     } finally {
-      setLoading(false);
-      setFetching(false);
+      if (requestId === latestRecordsRequestRef.current) {
+        setLoading(false);
+        setFetching(false);
+      }
     }
   }, [search, statusFilter, typeFilter]);
 
@@ -116,7 +129,7 @@ export default function GenerationsPage() {
       loadRecords(1, true);
     }, 300);
     return () => clearTimeout(handle);
-  }, [loadRecords, search, statusFilter, typeFilter]);
+  }, [loadRecords]);
 
   const handleDelete = async (id: string) => {
     if (!confirm('确定删除此记录？')) return;

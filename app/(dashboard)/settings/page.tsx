@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { useSession, signOut } from 'next-auth/react';
-import { User, Key, LogOut, Loader2, Check, Mail, Shield, Coins, Gift, UserPlus, Copy, Ticket, CreditCard, ReceiptText, ShoppingBag } from 'lucide-react';
+import { User, Key, LogOut, Loader2, Check, Mail, Shield, Coins, UserPlus, Copy, CreditCard, ReceiptText, ShoppingBag } from 'lucide-react';
 import { toast } from '@/components/ui/toaster';
 import { formatBalance } from '@/lib/utils';
 import { useSiteConfig } from '@/components/providers/site-config-provider';
@@ -62,10 +62,6 @@ export default function SettingsPage() {
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [loading, setLoading] = useState(false);
-  
-  // Redemption code
-  const [redeemCode, setRedeemCode] = useState('');
-  const [redeemLoading, setRedeemLoading] = useState(false);
   const [financeRecords, setFinanceRecords] = useState<FinanceRecords>({
     paymentOrders: [],
     consumptionRecords: [],
@@ -145,37 +141,6 @@ export default function SettingsPage() {
       });
     } finally {
       setLoading(false);
-    }
-  };
-
-  const handleRedeemCode = async () => {
-    if (!redeemCode.trim()) {
-      toast({ title: '请输入兑换码', variant: 'destructive' });
-      return;
-    }
-
-    setRedeemLoading(true);
-    try {
-      const res = await fetch('/api/redeem', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ code: redeemCode.trim() }),
-      });
-
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error);
-
-      toast({ title: '兑换成功', description: `获得 ${formatBalance(data.points)} 积分` });
-      setRedeemCode('');
-      updateSession();
-    } catch (err) {
-      toast({ 
-        title: '兑换失败', 
-        description: err instanceof Error ? err.message : '未知错误',
-        variant: 'destructive' 
-      });
-    } finally {
-      setRedeemLoading(false);
     }
   };
 
@@ -304,40 +269,6 @@ export default function SettingsPage() {
               </div>
               <p className="text-foreground text-2xl font-light">{formatBalance(session.user.balance)} <span className="text-sm text-foreground/40">积分</span></p>
             </div>
-          </div>
-        </div>
-      </div>
-
-      {/* Redeem Code Card */}
-      <div className="surface overflow-hidden">
-        <div className="p-6 border-b border-border/70">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-emerald-500/15 rounded-xl flex items-center justify-center border border-emerald-500/30">
-              <Gift className="w-5 h-5 text-emerald-300" />
-            </div>
-            <div>
-              <h2 className="text-lg font-medium text-foreground">积分兑换</h2>
-              <p className="text-sm text-foreground/40">使用兑换码获取积分</p>
-            </div>
-          </div>
-        </div>
-        <div className="p-6 space-y-4">
-          <div className="flex gap-3">
-            <input
-              type="text"
-              value={redeemCode}
-              onChange={(e) => setRedeemCode(e.target.value.toUpperCase())}
-              placeholder="输入兑换码"
-              className="flex-1 px-4 py-3 bg-input/70 border border-border/70 rounded-xl text-foreground placeholder:text-muted-foreground/60 focus:outline-none focus:border-border focus:ring-2 focus:ring-ring/30 transition-colors uppercase tracking-wider"
-            />
-            <button
-              onClick={handleRedeemCode}
-              disabled={redeemLoading}
-              className="flex items-center gap-2 px-6 py-3 bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 rounded-xl font-medium hover:bg-emerald-500/25 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {redeemLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Ticket className="w-4 h-4" />}
-              兑换
-            </button>
           </div>
         </div>
       </div>

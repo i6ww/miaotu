@@ -14,6 +14,7 @@ export async function getPublicSiteConfig(): Promise<ExtendedSiteConfig> {
     contactEmail: config.siteConfig?.contactEmail || 'support@sanhub.com',
     copyright: config.siteConfig?.copyright || 'Copyright © 2025 SANHUB',
     poweredBy: config.siteConfig?.poweredBy || 'Powered by OpenAI Sora & Google Gemini',
+    pointsPurchaseUrl: config.siteConfig?.pointsPurchaseUrl || '',
     defaultBalance: config.defaultBalance ?? 100,
     squareEnabled: config.featureFlags?.squareEnabled ?? true,
     gachaEnabled: config.featureFlags?.gachaEnabled ?? true,

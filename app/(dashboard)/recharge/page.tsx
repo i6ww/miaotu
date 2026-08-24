@@ -3,8 +3,9 @@
 import { useEffect, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { useSession } from 'next-auth/react';
-import { CreditCard, Loader2, Wallet } from 'lucide-react';
+import { CreditCard, ExternalLink, Gift, Loader2, Ticket, Wallet } from 'lucide-react';
 import { toast } from '@/components/ui/toaster';
+import { useSiteConfig } from '@/components/providers/site-config-provider';
 import { formatBalance } from '@/lib/utils';
 
 interface PublicPaymentConfig {
@@ -20,14 +21,29 @@ function formatCurrency(amount: number): string {
   return `¥${Math.max(0.01, amount).toFixed(2)}`;
 }
 
+function normalizeExternalUrl(value?: string): string {
+  const trimmed = value?.trim();
+  if (!trimmed) return '';
+
+  try {
+    const url = new URL(trimmed);
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.toString() : '';
+  } catch {
+    return '';
+  }
+}
+
 export default function RechargePage() {
   const { data: session, update: updateSession } = useSession();
+  const siteConfig = useSiteConfig();
   const searchParams = useSearchParams();
   const [paymentConfig, setPaymentConfig] = useState<PublicPaymentConfig | null>(null);
   const [rechargeAmount, setRechargeAmount] = useState(10);
   const [paymentType, setPaymentType] = useState('alipay');
   const [paymentLoading, setPaymentLoading] = useState(false);
   const [configLoading, setConfigLoading] = useState(true);
+  const [redeemCode, setRedeemCode] = useState('');
+  const [redeemLoading, setRedeemLoading] = useState(false);
 
   useEffect(() => {
     loadPaymentConfig();
@@ -91,6 +107,39 @@ export default function RechargePage() {
     }
   };
 
+  const handleRedeemCode = async () => {
+    if (!redeemCode.trim()) {
+      toast({ title: '\u8bf7\u8f93\u5165\u5151\u6362\u7801', variant: 'destructive' });
+      return;
+    }
+
+    setRedeemLoading(true);
+    try {
+      const res = await fetch('/api/redeem', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code: redeemCode.trim() }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || '\u5151\u6362\u5931\u8d25');
+
+      toast({
+        title: '\u5151\u6362\u6210\u529f',
+        description: `\u83b7\u5f97 ${formatBalance(data.points)} \u79ef\u5206`,
+      });
+      setRedeemCode('');
+      updateSession();
+    } catch (err) {
+      toast({
+        title: '\u5151\u6362\u5931\u8d25',
+        description: err instanceof Error ? err.message : '\u672a\u77e5\u9519\u8bef',
+        variant: 'destructive',
+      });
+    } finally {
+      setRedeemLoading(false);
+    }
+  };
+
   if (!session?.user) {
     return null;
   }
@@ -100,6 +149,7 @@ export default function RechargePage() {
   const rechargePoints = Math.round(
     rechargeAmount * (paymentConfig?.pointsPerCny || 100)
   );
+  const pointsPurchaseUrl = normalizeExternalUrl(siteConfig.pointsPurchaseUrl);
 
   return (
     <div className="mx-auto max-w-4xl space-y-6">
@@ -111,27 +161,81 @@ export default function RechargePage() {
       </div>
 
       <div className="grid gap-4 md:grid-cols-[280px_minmax(0,1fr)]">
-        <div className="surface p-5">
-          <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-sky-500/30 bg-sky-500/15">
-              <Wallet className="h-5 w-5 text-sky-300" />
+        <div className="space-y-4">
+          <div className="surface p-5">
+            <div className="flex items-center gap-3">
+              <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-sky-500/30 bg-sky-500/15">
+                <Wallet className="h-5 w-5 text-sky-300" />
+              </div>
+              <div>
+                <p className="text-sm text-foreground/45">{'\u5f53\u524d\u4f59\u989d'}</p>
+                <p className="text-2xl font-light text-foreground">
+                  {formatBalance(session.user.balance)}
+                  <span className="ml-1 text-sm text-foreground/40">{'\u79ef\u5206'}</span>
+                </p>
+              </div>
             </div>
-            <div>
-              <p className="text-sm text-foreground/45">{'\u5f53\u524d\u4f59\u989d'}</p>
-              <p className="text-2xl font-light text-foreground">
-                {formatBalance(session.user.balance)}
-                <span className="ml-1 text-sm text-foreground/40">{'\u79ef\u5206'}</span>
-              </p>
+            {paymentConfig?.enabled && (
+              <div className="mt-5 rounded-xl border border-border/70 bg-card/50 p-4 text-sm text-foreground/55">
+                {'1 \u5143\u4eba\u6c11\u5e01 = '}
+                <span className="text-foreground">
+                  {formatBalance(paymentConfig.pointsPerCny)}
+                </span>
+                {' \u79ef\u5206'}
+              </div>
+            )}
+          </div>
+
+          <div className="surface overflow-hidden">
+            <div className="border-b border-border/70 p-5">
+              <div className="flex items-center gap-3">
+                <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-emerald-500/30 bg-emerald-500/15">
+                  <Gift className="h-5 w-5 text-emerald-300" />
+                </div>
+                <div>
+                  <h2 className="text-base font-medium text-foreground">{'\u79ef\u5206\u5151\u6362'}</h2>
+                  <p className="text-sm text-foreground/40">{'\u4f7f\u7528\u5151\u6362\u7801\u83b7\u53d6\u79ef\u5206'}</p>
+                </div>
+              </div>
+            </div>
+            <div className="space-y-3 p-5">
+              <input
+                type="text"
+                value={redeemCode}
+                onChange={(event) => setRedeemCode(event.target.value.toUpperCase())}
+                placeholder={"\u8f93\u5165\u5151\u6362\u7801"}
+                className="w-full rounded-xl border border-border/70 bg-input/70 px-4 py-3 text-foreground uppercase tracking-wider outline-none transition-colors placeholder:text-muted-foreground/60 focus:border-border focus:ring-2 focus:ring-ring/30"
+              />
+              <button
+                type="button"
+                onClick={handleRedeemCode}
+                disabled={redeemLoading}
+                className="flex w-full items-center justify-center gap-2 rounded-xl border border-emerald-500/30 bg-emerald-500/15 px-4 py-3 font-medium text-emerald-300 transition-colors hover:bg-emerald-500/25 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {redeemLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Ticket className="h-4 w-4" />}
+                {'\u5151\u6362'}
+              </button>
             </div>
           </div>
-          {paymentConfig?.enabled && (
-            <div className="mt-5 rounded-xl border border-border/70 bg-card/50 p-4 text-sm text-foreground/55">
-              {'1 \u5143\u4eba\u6c11\u5e01 = '}
-              <span className="text-foreground">
-                {formatBalance(paymentConfig.pointsPerCny)}
+
+          {pointsPurchaseUrl && (
+            <a
+              href={pointsPurchaseUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="group flex min-h-[96px] items-center justify-between gap-4 rounded-xl border border-sky-400/60 bg-sky-500/20 px-5 py-4 text-left shadow-[0_16px_40px_rgba(14,165,233,0.16)] transition-colors hover:border-sky-300 hover:bg-sky-500/30"
+            >
+              <span className="flex min-w-0 items-center gap-3">
+                <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-sky-300/40 bg-sky-400/20">
+                  <CreditCard className="h-5 w-5 text-sky-100" />
+                </span>
+                <span className="min-w-0">
+                  <span className="block text-base font-medium text-sky-50">{'\u79ef\u5206\u8d2d\u4e70'}</span>
+                  <span className="mt-1 block text-xs leading-5 text-sky-100/70">{'\u6253\u5f00\u5916\u90e8\u8d2d\u4e70\u9875\u9762'}</span>
+                </span>
               </span>
-              {' \u79ef\u5206'}
-            </div>
+              <ExternalLink className="h-5 w-5 shrink-0 text-sky-100 transition-transform group-hover:translate-x-0.5" />
+            </a>
           )}
         </div>
 

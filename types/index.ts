@@ -112,6 +112,8 @@ export interface GenerationParams {
   processedPrompt?: string;
   progress?: number; // 生成进度 0-100
   clientRequestId?: string;
+  referenceVideoUrls?: string[];
+  referenceAudioUrls?: string[];
   batchId?: string;
   batchName?: string;
   batchIndex?: number;
@@ -190,7 +192,8 @@ export type VideoChannelType =
   | 'sora'
   | 'openai-compatible'
   | 'flow2api'
-  | 'grok2api';
+  | 'grok2api'
+  | 'minimax-h3';
 
 // 模型功能特性
 export interface ImageModelFeatures {
@@ -300,7 +303,7 @@ export interface VideoDuration {
   cost: number;    // 该时长的积分消耗
 }
 
-export type VideoAspectRatio = '16:9' | '9:16' | '1:1' | '2:3' | '3:2';
+export type VideoAspectRatio = '16:9' | '9:16' | '1:1' | '2:3' | '3:2' | '3:4' | '4:3' | '21:9';
 export type VideoResolution = 'SD' | 'HD';
 export type VideoPreset = 'fun' | 'normal' | 'spicy';
 
@@ -368,6 +371,7 @@ export interface SiteConfig {
   contactEmail: string;       // 联系邮箱
   copyright: string;          // 版权信息
   poweredBy: string;          // 技术支持信息
+  pointsPurchaseUrl: string;
 }
 
 export interface FeatureFlagsConfig {
@@ -646,6 +650,9 @@ export interface SoraGenerateRequest {
   video_config?: VideoConfigObject;
   files?: { mimeType: string; data: string }[];
   referenceImageUrl?: string;
+  referenceVideoUrls?: string[];
+  referenceAudioUrls?: string[];
+  publicBaseUrl?: string;
   style_id?: string; // 风格: festive, retro, news, selfie, handheld, anime, comic, golden, vintage
   remix_target_id?: string; // Remix 视频 ID
 }

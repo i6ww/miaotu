@@ -16,6 +16,7 @@ type UploadPayload = {
 type UploadOptions = {
   publicBaseUrl?: string;
   preferDirectS3Url?: boolean;
+  requirePublicBaseUrl?: boolean;
 };
 
 export type S3CachedObject = {
@@ -37,9 +38,22 @@ const EXTENSION_BY_MIME: Record<string, string> = {
   'video/mpeg': 'mpeg',
   'video/quicktime': 'mov',
   'video/webm': 'webm',
+  'video/x-matroska': 'mkv',
+  'video/mkv': 'mkv',
+  'application/x-mpegurl': 'm3u8',
+  'application/vnd.apple.mpegurl': 'm3u8',
+  'audio/mpeg': 'mp3',
+  'audio/mp3': 'mp3',
+  'audio/wav': 'wav',
+  'audio/x-wav': 'wav',
+  'audio/aac': 'aac',
+  'audio/ogg': 'ogg',
+  'audio/webm': 'webm',
+  'audio/mp4': 'm4a',
 };
 
 const s3Clients = new Map<string, S3Client>();
+const S3_OBJECT_CACHE_CONTROL = 'public, max-age=604800';
 
 export interface PicUIUploadResponse {
   status: boolean;
@@ -201,6 +215,20 @@ async function resolveS3CacheBucket(bucketId?: string): Promise<ImageBucketConfi
   if (bucketId) {
     return buckets.find((bucket) => bucket.id === bucketId) || null;
   }
+
+  if (config.imageStorage?.defaultBucketId) {
+    const defaultBucket = buckets.find((bucket) => bucket.id === config.imageStorage.defaultBucketId);
+    if (defaultBucket) return defaultBucket;
+  }
+
+  return buckets[0] || null;
+}
+
+async function resolveS3CompatibleBucket(): Promise<ImageBucketConfig | null> {
+  const config = await getSystemConfig();
+  const buckets = (config.imageStorage?.buckets || []).filter(
+    (bucket) => bucket.enabled && bucket.provider === 's3-compatible'
+  );
 
   if (config.imageStorage?.defaultBucketId) {
     const defaultBucket = buckets.find((bucket) => bucket.id === config.imageStorage.defaultBucketId);
@@ -375,6 +403,9 @@ async function uploadToS3Bucket(
   if (!bucket.baseUrl || !bucket.apiKey || !bucket.secretKey || !bucket.bucketName) {
     return null;
   }
+  if (options?.preferDirectS3Url && options.requirePublicBaseUrl && !bucket.publicBaseUrl?.trim()) {
+    return null;
+  }
 
   const client = getS3Client(bucket);
   await client.send(
@@ -383,7 +414,7 @@ async function uploadToS3Bucket(
       Key: payload.objectKey,
       Body: payload.buffer,
       ContentType: payload.mimeType,
-      CacheControl: 'public, max-age=31536000, immutable',
+      CacheControl: S3_OBJECT_CACHE_CONTROL,
     })
   );
 
@@ -451,6 +482,31 @@ export async function uploadBufferToImageBucket(
     return await uploadPayloadToBucket(bucket, payload, options);
   } catch (error) {
     console.error('[ImageBucket] Upload failed:', error);
+    return null;
+  }
+}
+
+export async function uploadBufferToS3CompatibleBucket(
+  buffer: Buffer,
+  mimeType: string,
+  filename?: string,
+  options: { requirePublicBaseUrl?: boolean } = {}
+): Promise<string | null> {
+  const bucket = await resolveS3CompatibleBucket();
+  if (!bucket) {
+    console.log('[ImageBucket] No enabled S3 compatible bucket configured, skip upload');
+    return null;
+  }
+
+  const payload = buildUploadPayloadFromBuffer(buffer, mimeType, filename, bucket);
+
+  try {
+    return await uploadToS3Bucket(bucket, payload, {
+      preferDirectS3Url: true,
+      requirePublicBaseUrl: options.requirePublicBaseUrl,
+    });
+  } catch (error) {
+    console.error('[ImageBucket] S3 compatible upload failed:', error);
     return null;
   }
 }

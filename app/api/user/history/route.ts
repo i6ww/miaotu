@@ -40,7 +40,9 @@ function convertToMediaUrl(generation: Generation): Generation {
     return generation;
   }
 
-  if (type.includes('video')) {
+  const isHttpUrl = resultUrl.startsWith('http://') || resultUrl.startsWith('https://');
+
+  if (type.includes('video') && !isHttpUrl) {
     return {
       ...generation,
       resultUrl: `/api/media/${generation.id}`,

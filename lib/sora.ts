@@ -5,6 +5,7 @@ import type { SoraGenerateRequest, GenerateResult, VideoChannel, VideoModel } fr
 import { generateVideo, type VideoGenerationRequest } from './sora-api';
 import { fetchWithRetry } from './http-retry';
 import { resolveFlowVeoModel } from './video-model-normalizer';
+import { uploadToImageBucket } from './picui';
 
 type LogLevel = 'debug' | 'info' | 'warn' | 'error' | 'silent';
 
@@ -66,6 +67,35 @@ const VIDEO_URL_PATTERN = /\.(mp4|mov|webm|mkv|m3u8)(\?|#|$)/i;
 const IMAGE_URL_PATTERN = /\.(jpg|jpeg|png|webp|gif|bmp|svg)(\?|#|$)/i;
 const GROK_MAX_VIDEO_LENGTH_SECONDS = 30;
 const GROK_SUPPORTED_VIDEO_LENGTHS = [6, 10, 12, 16, 20] as const;
+const MINIMAX_H3_DEFAULT_BASE_URL = 'https://snumom.com';
+const MINIMAX_H3_POLL_INTERVAL_MS = 5_000;
+const MINIMAX_H3_MAX_WAIT_MS = 20 * 60_000;
+const MINIMAX_H3_REFERENCE_IMAGE_LIMIT = 9;
+const MINIMAX_H3_REFERENCE_VIDEO_LIMIT = 3;
+const MINIMAX_H3_REFERENCE_AUDIO_LIMIT = 3;
+const MINIMAX_H3_TOTAL_REFERENCE_LIMIT = 12;
+
+const MINIMAX_H3_SIZES = {
+  '768p': {
+    '16:9': '1376x768',
+    '9:16': '768x1376',
+    '1:1': '1024x1024',
+    '4:3': '1152x864',
+    '3:4': '864x1152',
+    '3:2': '1248x832',
+    '2:3': '832x1248',
+    '21:9': '1792x768',
+  },
+  '1080p': {
+    '16:9': '1920x1080',
+    '9:16': '1080x1920',
+    '1:1': '1440x1440',
+    '4:3': '1664x1248',
+    '3:4': '1248x1664',
+    '3:2': '1728x1152',
+    '2:3': '1152x1728',
+  },
+} as const;
 
 function normalizeExtractedUrl(raw: string, baseUrl?: string): string | null {
   const trimmed = raw.trim();
@@ -707,6 +737,473 @@ function resolveGrokVideoConfigObject(
   };
 }
 
+function normalizeMinimaxH3AspectRatio(aspectRatio?: string): keyof typeof MINIMAX_H3_SIZES['768p'] {
+  const normalized = (aspectRatio || '').trim().toLowerCase();
+  switch (normalized) {
+    case 'portrait':
+      return '9:16';
+    case 'square':
+      return '1:1';
+    case 'landscape':
+      return '16:9';
+    case '9:16':
+    case '1:1':
+    case '4:3':
+    case '3:4':
+    case '3:2':
+    case '2:3':
+    case '21:9':
+      return normalized;
+    case '16:9':
+    default:
+      return '16:9';
+  }
+}
+
+function resolveMinimaxH3Size(modelName: string, aspectRatio?: string): string {
+  const resolution = modelName.toLowerCase().includes('1080p') ? '1080p' : '768p';
+  const ratio = normalizeMinimaxH3AspectRatio(aspectRatio);
+  const sizes = MINIMAX_H3_SIZES[resolution];
+  const size = (sizes as Partial<Record<typeof ratio, string>>)[ratio];
+
+  if (!size) {
+    throw new Error(`Minimax H3 ${resolution} does not support aspect ratio ${ratio}`);
+  }
+
+  return size;
+}
+
+function normalizeMinimaxH3Seconds(duration?: string): number {
+  const seconds = normalizeDurationSeconds(duration || '5s');
+  return Math.max(4, Math.min(15, seconds));
+}
+
+function pickEffectiveApiKey(channel: VideoChannel, model: VideoModel): string {
+  return (model.apiKey || channel.apiKey || '')
+    .split(',')
+    .map((key) => key.trim())
+    .find(Boolean) || '';
+}
+
+function normalizeMinimaxH3BaseUrl(channel: VideoChannel, model: VideoModel): string {
+  return (model.baseUrl || channel.baseUrl || MINIMAX_H3_DEFAULT_BASE_URL).replace(/\/$/, '');
+}
+
+function isPublicMinimaxReferenceUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    const hostname = url.hostname.toLowerCase();
+    const isPublicProtocol = url.protocol === 'http:' || url.protocol === 'https:';
+    const hasAllowedPort = !url.port || url.port === '80' || url.port === '443';
+    const isLocalhost = hostname === 'localhost' || hostname.endsWith('.localhost');
+    return isPublicProtocol && hasAllowedPort && !isLocalhost;
+  } catch {
+    return false;
+  }
+}
+
+function normalizeMinimaxH3ReferenceUrls(
+  value: string[] | undefined,
+  limit: number,
+  label: string
+): string[] {
+  const urls: string[] = [];
+
+  for (const item of value || []) {
+    if (typeof item !== 'string') continue;
+    const trimmed = item.trim();
+    if (!trimmed || urls.includes(trimmed)) continue;
+
+    if (!isPublicMinimaxReferenceUrl(trimmed)) {
+      throw new Error(`Minimax H3 ${label} reference URL must be a public HTTP(S) URL on port 80 or 443: ${trimmed}`);
+    }
+
+    if (urls.length >= limit) {
+      throw new Error(`Minimax H3 supports up to ${limit} ${label} reference URLs`);
+    }
+
+    urls.push(trimmed);
+  }
+
+  return urls;
+}
+
+function dataUrlForFile(file: { mimeType: string; data: string }): string {
+  if (file.data.startsWith('data:')) return file.data;
+  return `data:${file.mimeType || 'image/jpeg'};base64,${file.data}`;
+}
+
+async function buildMinimaxH3ReferenceImages(
+  request: SoraGenerateRequest
+): Promise<Array<{ url: string }>> {
+  const urls: string[] = [];
+  const addUrl = (url: string | undefined, source: string) => {
+    if (!url) {
+      logDebug('[Video Adapter] Minimax H3 reference image skipped: empty URL', { source });
+      return;
+    }
+    const trimmed = url.trim();
+    if (!trimmed) {
+      logDebug('[Video Adapter] Minimax H3 reference image skipped: blank URL', { source });
+      return;
+    }
+    if (urls.includes(trimmed)) {
+      logDebug('[Video Adapter] Minimax H3 reference image skipped: duplicate URL', { source, url: trimmed });
+      return;
+    }
+    if (isPublicMinimaxReferenceUrl(trimmed)) {
+      if (urls.length >= MINIMAX_H3_REFERENCE_IMAGE_LIMIT) {
+        throw new Error(`Minimax H3 supports up to ${MINIMAX_H3_REFERENCE_IMAGE_LIMIT} image references`);
+      }
+      urls.push(trimmed);
+      logInfo('[Video Adapter] Minimax H3 reference image accepted:', {
+        source,
+        index: urls.length - 1,
+        url: trimmed,
+      });
+      return;
+    }
+
+    logWarn('[Video Adapter] Minimax H3 reference image skipped: URL is not public HTTP(S)', {
+      source,
+      url: trimmed,
+    });
+  };
+
+  addUrl(request.referenceImageUrl, 'referenceImageUrl');
+
+  const files = request.files || [];
+  logInfo('[Video Adapter] Minimax H3 reference image build started:', {
+    directReferenceImageUrl: request.referenceImageUrl || null,
+    fileCount: files.length,
+    imageFileCount: files.filter((file) => file?.mimeType.startsWith('image/')).length,
+  });
+
+  for (let index = 0; index < files.length; index += 1) {
+    const file = files[index];
+    if (!file) continue;
+    if (!file.mimeType.startsWith('image/')) {
+      logDebug('[Video Adapter] Minimax H3 reference file skipped: not an image', {
+        index,
+        mimeType: file.mimeType,
+      });
+      continue;
+    }
+    if (urls.length >= MINIMAX_H3_REFERENCE_IMAGE_LIMIT) {
+      throw new Error(`Minimax H3 supports up to ${MINIMAX_H3_REFERENCE_IMAGE_LIMIT} image references`);
+    }
+
+    const filename = `minimax-h3-reference-${Date.now()}-${index}`;
+    logInfo('[Video Adapter] Minimax H3 reference image upload started:', {
+      index,
+      mimeType: file.mimeType,
+      dataLength: file.data.length,
+      filename,
+    });
+
+    const uploadedUrl = await uploadToImageBucket(
+      dataUrlForFile(file),
+      filename,
+      { publicBaseUrl: request.publicBaseUrl, preferDirectS3Url: true }
+    );
+
+    logInfo('[Video Adapter] Minimax H3 reference image upload finished:', {
+      index,
+      mimeType: file.mimeType,
+      filename,
+      uploadedUrl,
+    });
+
+    if (!uploadedUrl || !isPublicMinimaxReferenceUrl(uploadedUrl)) {
+      throw new Error('Minimax H3 image-to-video requires a public image bucket URL');
+    }
+
+    addUrl(uploadedUrl, `files[${index}]`);
+  }
+
+  logInfo('[Video Adapter] Minimax H3 reference image build completed:', {
+    referenceImages: urls.map((url, index) => ({ index, url })),
+  });
+
+  return urls.map((url) => ({ url }));
+}
+
+function getObjectValue(source: unknown, path: string[]): unknown {
+  let current = source;
+  for (const key of path) {
+    if (!current || typeof current !== 'object') return undefined;
+    current = (current as Record<string, unknown>)[key];
+  }
+  return current;
+}
+
+function extractMinimaxH3TaskId(payload: unknown): string | null {
+  const candidates = [
+    getObjectValue(payload, ['id']),
+    getObjectValue(payload, ['data', 'id']),
+    getObjectValue(payload, ['task_id']),
+    getObjectValue(payload, ['data', 'task_id']),
+  ];
+
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string' && candidate.trim()) {
+      return candidate.trim();
+    }
+  }
+
+  return null;
+}
+
+function extractMinimaxH3Status(payload: unknown): string {
+  const candidates = [
+    getObjectValue(payload, ['status']),
+    getObjectValue(payload, ['data', 'status']),
+    getObjectValue(payload, ['state']),
+    getObjectValue(payload, ['data', 'state']),
+  ];
+
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string' && candidate.trim()) {
+      return candidate.trim().toLowerCase();
+    }
+  }
+
+  return 'unknown';
+}
+
+function extractMinimaxH3Error(payload: unknown): string | null {
+  const upstream = extractUpstreamErrorMessage(payload);
+  if (upstream) return upstream;
+
+  const candidates = [
+    getObjectValue(payload, ['message']),
+    getObjectValue(payload, ['data', 'message']),
+    getObjectValue(payload, ['error_message']),
+    getObjectValue(payload, ['data', 'error_message']),
+  ];
+
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string' && candidate.trim()) {
+      return candidate.trim();
+    }
+  }
+
+  return null;
+}
+
+function extractMinimaxH3VideoUrl(payload: unknown, baseUrl: string): string | null {
+  const candidates = [
+    getObjectValue(payload, ['metadata', 'url']),
+    getObjectValue(payload, ['data', 'metadata', 'url']),
+    getObjectValue(payload, ['url']),
+    getObjectValue(payload, ['data', 'url']),
+    getObjectValue(payload, ['video_url']),
+    getObjectValue(payload, ['data', 'video_url']),
+  ];
+
+  for (const candidate of candidates) {
+    if (typeof candidate !== 'string') continue;
+    const normalized = normalizeExtractedUrl(candidate, baseUrl);
+    if (normalized) return normalized;
+  }
+
+  return extractVideoUrlFromUnknownPayload(payload, baseUrl);
+}
+
+async function readJsonResponse(response: Awaited<ReturnType<typeof undiciFetch>>): Promise<unknown> {
+  const rawBody = await response.text();
+  if (!rawBody.trim()) return null;
+
+  try {
+    return JSON.parse(rawBody);
+  } catch {
+    return rawBody;
+  }
+}
+
+async function downloadMinimaxH3Content(
+  baseUrl: string,
+  apiKey: string,
+  taskId: string
+): Promise<string> {
+  const response = await fetchWithRetry(undiciFetch, `${baseUrl}/v1/videos/${encodeURIComponent(taskId)}/content`, () => ({
+    method: 'GET',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      Accept: 'video/*,*/*',
+    },
+  }), {
+    attempts: 4,
+    baseDelayMs: 1_000,
+    maxDelayMs: 8_000,
+  });
+
+  if (!response.ok) {
+    const details = await response.text().catch(() => '');
+    throw new Error(`Minimax H3 content download failed (${response.status})${details ? `: ${compactSnippet(details, 300)}` : ''}`);
+  }
+
+  const contentType = response.headers.get('content-type')?.split(';')[0]?.trim() || 'video/mp4';
+  const buffer = Buffer.from(await response.arrayBuffer());
+  return `data:${contentType};base64,${buffer.toString('base64')}`;
+}
+
+async function waitForMinimaxH3Task(
+  baseUrl: string,
+  apiKey: string,
+  taskId: string,
+  onProgress?: (progress: number) => void
+): Promise<string> {
+  const startedAt = Date.now();
+  let lastProgress = 10;
+  onProgress?.(lastProgress);
+
+  while (Date.now() - startedAt < MINIMAX_H3_MAX_WAIT_MS) {
+    await new Promise((resolve) => setTimeout(resolve, MINIMAX_H3_POLL_INTERVAL_MS));
+
+    const response = await fetchWithRetry(undiciFetch, `${baseUrl}/v1/videos/${encodeURIComponent(taskId)}`, () => ({
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        Accept: 'application/json',
+      },
+    }), {
+      attempts: 3,
+      baseDelayMs: 1_000,
+      maxDelayMs: 8_000,
+    });
+
+    const payload = await readJsonResponse(response);
+    if (!response.ok) {
+      const detail = extractMinimaxH3Error(payload) || compactSnippet(String(payload || ''), 300);
+      throw new Error(`Minimax H3 status request failed (${response.status})${detail ? `: ${detail}` : ''}`);
+    }
+
+    const status = extractMinimaxH3Status(payload);
+    if (status === 'completed') {
+      onProgress?.(95);
+      const videoUrl = extractMinimaxH3VideoUrl(payload, baseUrl);
+      return videoUrl || downloadMinimaxH3Content(baseUrl, apiKey, taskId);
+    }
+
+    if (status === 'failed' || status === 'error') {
+      throw new Error(extractMinimaxH3Error(payload) || 'Minimax H3 generation failed');
+    }
+
+    const elapsedRatio = Math.min(1, (Date.now() - startedAt) / MINIMAX_H3_MAX_WAIT_MS);
+    const nextProgress = Math.max(lastProgress, Math.min(90, Math.floor(10 + elapsedRatio * 80)));
+    if (nextProgress > lastProgress) {
+      lastProgress = nextProgress;
+      onProgress?.(nextProgress);
+    }
+  }
+
+  throw new Error('Minimax H3 generation timed out');
+}
+
+async function generateViaMinimaxH3(
+  channel: VideoChannel,
+  model: VideoModel,
+  request: SoraGenerateRequest,
+  onProgress?: (progress: number) => void
+): Promise<GenerateResult> {
+  const baseUrl = normalizeMinimaxH3BaseUrl(channel, model);
+  const apiKey = pickEffectiveApiKey(channel, model);
+
+  if (!apiKey) {
+    throw new Error('Minimax H3 channel is missing API Key');
+  }
+
+  const apiModel = (model.apiModel || request.model || 'minimax_h3-768p').trim();
+  const seconds = normalizeMinimaxH3Seconds(request.duration || model.defaultDuration);
+  const size = resolveMinimaxH3Size(apiModel, request.aspectRatio || model.defaultAspectRatio);
+  const referenceImages = await buildMinimaxH3ReferenceImages(request);
+  const referenceVideos = normalizeMinimaxH3ReferenceUrls(
+    request.referenceVideoUrls,
+    MINIMAX_H3_REFERENCE_VIDEO_LIMIT,
+    'video'
+  );
+  const referenceAudios = normalizeMinimaxH3ReferenceUrls(
+    request.referenceAudioUrls,
+    MINIMAX_H3_REFERENCE_AUDIO_LIMIT,
+    'audio'
+  );
+  const totalReferenceCount = referenceImages.length + referenceVideos.length + referenceAudios.length;
+
+  if (totalReferenceCount > MINIMAX_H3_TOTAL_REFERENCE_LIMIT) {
+    throw new Error(`Minimax H3 supports up to ${MINIMAX_H3_TOTAL_REFERENCE_LIMIT} total references`);
+  }
+
+  const payload: Record<string, unknown> = {
+    model: apiModel,
+    prompt: request.prompt || 'Generate a video',
+    seconds: String(seconds),
+    size,
+  };
+
+  if (referenceImages.length > 0) {
+    payload.reference_images = referenceImages;
+  }
+  if (referenceVideos.length > 0) {
+    payload.reference_videos = referenceVideos;
+  }
+  if (referenceAudios.length > 0) {
+    payload.reference_audios = referenceAudios;
+  }
+
+  onProgress?.(5);
+
+  logInfo('[Video Adapter] Minimax H3 create request:', {
+    channelName: channel.name,
+    apiUrl: `${baseUrl}/v1/videos`,
+    model: apiModel,
+    seconds,
+    size,
+    referenceImageCount: referenceImages.length,
+    referenceImages,
+    referenceVideoCount: referenceVideos.length,
+    referenceVideos,
+    referenceAudioCount: referenceAudios.length,
+    referenceAudios,
+    requestPayload: payload,
+  });
+
+  const response = await fetchWithRetry(undiciFetch, `${baseUrl}/v1/videos`, () => ({
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify(payload),
+  }), {
+    attempts: 3,
+    baseDelayMs: 1_000,
+    maxDelayMs: 8_000,
+  });
+
+  const responsePayload = await readJsonResponse(response);
+  if (!response.ok) {
+    const detail = extractMinimaxH3Error(responsePayload) || compactSnippet(String(responsePayload || ''), 400);
+    throw new Error(`Minimax H3 create request failed (${response.status})${detail ? `: ${detail}` : ''}`);
+  }
+
+  const taskId = extractMinimaxH3TaskId(responsePayload);
+  if (!taskId) {
+    throw new Error('Minimax H3 create response did not include a task id');
+  }
+
+  const url = await waitForMinimaxH3Task(baseUrl, apiKey, taskId, onProgress);
+  onProgress?.(100);
+
+  return {
+    type: 'sora-video',
+    url,
+    cost: resolveVideoGenerationCost((await getSystemConfig()).pricing, request, model),
+    videoId: taskId,
+    videoChannelId: channel.id,
+  };
+}
+
 function resolveRequestedVideoLengthSeconds(request: SoraGenerateRequest, model?: VideoModel): number {
   const requestConfig = request.videoConfigObject || request.video_config;
   if (typeof requestConfig?.video_length === 'number' && Number.isFinite(requestConfig.video_length)) {
@@ -1041,6 +1538,10 @@ async function generateByVideoModel(
   }
 
   const channelType = channel.type;
+  if (channelType === 'minimax-h3') {
+    return generateViaMinimaxH3(channel, model, request, onProgress);
+  }
+
   if (channelType === 'flow2api' || channelType === 'grok2api' || channelType === 'openai-compatible') {
     return generateViaExternalChat(channel, model, request, onProgress);
   }

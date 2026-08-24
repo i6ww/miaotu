@@ -24,6 +24,7 @@ const defaultSiteConfig: ExtendedSiteConfig = {
   contactEmail: 'support@sanhub.com',
   copyright: 'Copyright © 2025 SANHUB',
   poweredBy: 'Powered by OpenAI Sora & Google Gemini',
+  pointsPurchaseUrl: '',
   defaultBalance: 100,
   squareEnabled: true,
   gachaEnabled: true,

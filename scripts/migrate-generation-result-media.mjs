@@ -16,6 +16,7 @@ const DEFAULT_MAX_FAILURES = 10;
 const DATA_URL_PATTERN = /^data:([^;]+);base64,(.+)$/s;
 const DATA_DIR = process.env.DATA_DIR || './data';
 const MEDIA_DIR = path.join(DATA_DIR, 'media');
+const S3_OBJECT_CACHE_CONTROL = 'public, max-age=604800';
 
 const EXTENSION_BY_MIME = {
   'image/jpeg': 'jpg',
@@ -402,7 +403,7 @@ async function uploadToS3Bucket(bucket, payload, options) {
       Key: payload.objectKey,
       Body: payload.buffer,
       ContentType: payload.mimeType,
-      CacheControl: 'public, max-age=31536000, immutable',
+      CacheControl: S3_OBJECT_CACHE_CONTROL,
     })
   );
 

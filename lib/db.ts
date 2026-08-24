@@ -265,7 +265,8 @@ CREATE TABLE IF NOT EXISTS system_config (
   generation_queue_image_concurrency INT DEFAULT 16,
   generation_queue_channel_concurrency INT DEFAULT 16,
   generation_queue_lock_timeout_seconds INT DEFAULT 900,
-  generation_queue_max_attempts INT DEFAULT 2
+  generation_queue_max_attempts INT DEFAULT 2,
+  site_points_purchase_url VARCHAR(500) DEFAULT ''
 );
 
 -- 聊天模型表
@@ -737,6 +738,12 @@ async function initializeDatabaseInternal(): Promise<void> {
   }
 
   // 添加模型禁用配置字段
+  try {
+    await db.execute("ALTER TABLE system_config ADD COLUMN site_points_purchase_url VARCHAR(500) DEFAULT ''");
+  } catch {
+    // ignore existing column
+  }
+
   try {
     await db.execute("ALTER TABLE system_config ADD COLUMN disabled_image_models TEXT");
   } catch {
@@ -2907,6 +2914,7 @@ export async function getSystemConfig(): Promise<SystemConfig> {
           contactEmail: 'support@sanhub.com',
           copyright: 'Copyright © 2025 SANHUB',
           poweredBy: 'Powered by OpenAI Sora & Google Gemini',
+          pointsPurchaseUrl: '',
         },
         disabledModels: {
           imageModels: [],
@@ -3003,6 +3011,7 @@ export async function getSystemConfig(): Promise<SystemConfig> {
         contactEmail: row.contact_email || 'support@sanhub.com',
         copyright: row.site_copyright || 'Copyright © 2025 SANHUB',
         poweredBy: row.site_powered_by || 'Powered by OpenAI Sora & Google Gemini',
+        pointsPurchaseUrl: row.site_points_purchase_url || '',
       },
       disabledModels: {
         imageModels: row.disabled_image_models ? JSON.parse(row.disabled_image_models) : [],
@@ -3418,6 +3427,10 @@ export async function updateSystemConfig(
     if (s.poweredBy !== undefined) {
       fields.push('site_powered_by = ?');
       values.push(s.poweredBy);
+    }
+    if (s.pointsPurchaseUrl !== undefined) {
+      fields.push('site_points_purchase_url = ?');
+      values.push(s.pointsPurchaseUrl);
     }
   }
   // 模型禁用配置

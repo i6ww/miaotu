@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getVideoContentUrl } from '@/lib/sora-api';
 import { buildErrorResponse, extractBearerToken, isAuthorized } from '@/lib/v1';
-import { saveMediaAsync } from '@/lib/media-storage';
+import { saveVideoMediaPreferS3 } from '@/lib/media-storage';
 
 export const dynamic = 'force-dynamic';
 
@@ -26,7 +26,7 @@ export async function GET(request: NextRequest, context: { params: { video_id: s
   try {
     const url = await getVideoContentUrl(videoId);
     const origin = new URL(request.url).origin;
-    const cachedUrl = await saveMediaAsync(`v1-video-${videoId}`, url, { publicBaseUrl: origin });
+    const cachedUrl = await saveVideoMediaPreferS3(`v1-video-${videoId}`, url, { publicBaseUrl: origin });
     return NextResponse.redirect(cachedUrl, 302);
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Failed to get video content';

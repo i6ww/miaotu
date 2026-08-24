@@ -271,10 +271,17 @@ export function buildVideoModelDescription(params: {
 function toSafeVideoModel(model: VideoModel, channel: VideoChannel): SafeVideoModel {
   const aspectRatios = mergeVideoAspectRatios([model]);
   const isGrokModel = channel.type === 'grok2api';
+  const isMinimaxH3Model = channel.type === 'minimax-h3';
   const grokDurations = isGrokModel ? getGrokUserFacingVideoDurations(model) : [];
+  const minimaxDurations = model.durations.length > 0
+    ? model.durations
+    : [{ value: '5s', label: '5s', cost: 35 }];
   const grokDefaultDuration = grokDurations.some((duration) => duration.value === model.defaultDuration)
     ? model.defaultDuration
     : grokDurations[0]?.value || GROK_USER_VIDEO_DURATION_VALUE;
+  const minimaxDefaultDuration = minimaxDurations.some((duration) => duration.value === model.defaultDuration)
+    ? model.defaultDuration
+    : minimaxDurations[0]?.value || '5s';
   return {
     id: model.id,
     channelId: model.channelId,
@@ -289,9 +296,17 @@ function toSafeVideoModel(model: VideoModel, channel: VideoChannel): SafeVideoMo
       : model.description,
     features: model.features,
     aspectRatios,
-    durations: isGrokModel ? grokDurations : getUserFacingVideoDurations([model]),
+    durations: isGrokModel
+      ? grokDurations
+      : isMinimaxH3Model
+        ? minimaxDurations
+        : getUserFacingVideoDurations([model]),
     defaultAspectRatio: getDefaultAspectRatio(aspectRatios),
-    defaultDuration: isGrokModel ? grokDefaultDuration : USER_VIDEO_DURATION_VALUE,
+    defaultDuration: isGrokModel
+      ? grokDefaultDuration
+      : isMinimaxH3Model
+        ? minimaxDefaultDuration
+        : USER_VIDEO_DURATION_VALUE,
     videoConfigObject: model.videoConfigObject
       ? {
           ...model.videoConfigObject,

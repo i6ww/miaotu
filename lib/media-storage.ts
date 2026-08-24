@@ -4,6 +4,7 @@ import { promises as fsp } from 'fs';
 import path from 'path';
 import {
   resolveDefaultImageBucket,
+  uploadBufferToS3CompatibleBucket,
   uploadBufferToImageBucket,
   uploadToPicUI,
 } from './picui';
@@ -80,6 +81,10 @@ function getExtension(mimeType: string): string {
     'video/mp4': 'mp4',
     'video/quicktime': 'mov',
     'video/webm': 'webm',
+    'video/x-matroska': 'mkv',
+    'video/mkv': 'mkv',
+    'application/x-mpegurl': 'm3u8',
+    'application/vnd.apple.mpegurl': 'm3u8',
   };
   return map[mimeType] || 'bin';
 }
@@ -212,6 +217,44 @@ export async function saveMediaAsync(
 ): Promise<string> {
   const result = await saveMediaWithMetrics(id, dataUrl, options);
   return result.url;
+}
+
+export async function saveVideoMediaPreferS3(
+  id: string,
+  mediaUrl: string,
+  options: SaveMediaOptions = {}
+): Promise<string> {
+  let buffer: Buffer;
+  let mimeType: string;
+
+  try {
+    if (isRemoteUrl(mediaUrl)) {
+      const remote = await downloadRemoteMedia(mediaUrl);
+      buffer = remote.buffer;
+      mimeType = remote.mimeType;
+    } else if (mediaUrl.startsWith('data:')) {
+      const parsed = parseDataUrl(mediaUrl);
+      if (!parsed) {
+        throw new Error('Invalid video data URL format');
+      }
+      buffer = Buffer.from(parsed.data, 'base64');
+      mimeType = parsed.mimeType;
+    } else {
+      return mediaUrl;
+    }
+
+    const filename = options.filename || filenameFromUrl(id, mediaUrl, mimeType);
+    const uploadedUrl = await uploadBufferToS3CompatibleBucket(buffer, mimeType, filename, {
+      requirePublicBaseUrl: true,
+    });
+    if (uploadedUrl) return uploadedUrl;
+
+    console.warn('[MediaStorage] Generated video R2 upload unavailable, keeping original URL');
+    return mediaUrl;
+  } catch (error) {
+    console.warn('[MediaStorage] Generated video R2 upload failed, keeping original URL:', error);
+    return mediaUrl;
+  }
 }
 
 export async function saveMediaWithMetrics(

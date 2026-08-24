@@ -377,6 +377,17 @@ export default function SiteConfigPage() {
           placeholder="技术支持信息"
           className="w-full rounded-lg border border-border/70 bg-card/60 px-4 py-3 text-foreground focus:outline-none"
         />
+        <input
+          value={config.siteConfig.pointsPurchaseUrl}
+          onChange={(event) =>
+            patch((prev) => ({
+              ...prev,
+              siteConfig: { ...prev.siteConfig, pointsPurchaseUrl: event.target.value },
+            }))
+          }
+          placeholder="积分购买链接，例如 https://example.com/pricing"
+          className="w-full rounded-lg border border-border/70 bg-card/60 px-4 py-3 text-foreground focus:outline-none"
+        />
       </Card>
 
       <Card icon={LayoutGrid} title="功能与邀请码">

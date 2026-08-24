@@ -3,7 +3,7 @@ import { getS3CachedObject } from '@/lib/picui';
 
 export const dynamic = 'force-dynamic';
 
-const CACHE_CONTROL = 'public, max-age=31536000, immutable';
+const CACHE_CONTROL = 'public, max-age=604800';
 
 function statusFromS3Error(error: unknown): number {
   const err = error as { name?: string; $metadata?: { httpStatusCode?: number }; message?: string };

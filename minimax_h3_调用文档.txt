@@ -1,0 +1,106 @@
+minimax_h3 调用文档（snumom）
+============================
+
+一、价格（美元，仅这两个模型）
+------------------------------
+minimax_h3-768p     $0.07 / 秒
+minimax_h3-1080p    $0.11 / 秒
+计费看模型名，不按 size 自动升档。其他模型无下列加收/折扣。
+按 seconds 计（4～15），不按排队时间。失败退预扣。
+不传 seconds 时按 5 秒生成并计费（与上游默认一致）。
+
+总价 = 基础秒费×折扣 + 超出参考图×折扣 + 768P比例加收（不打折）
+
+加收
+  参考图：前5张免费，第6张起每张 +$0.10（不按秒）
+          参考视频/音频不加钱
+  768P 比例：仅 4:3、3:4、3:2、2:3 每秒 +$0.005
+              16:9 / 9:16 / 1:1 / 21:9 不加
+              此项不参与任何折扣
+              请用第四节表格里的 size，否则可能加不到或加错
+
+折扣（北京时间，仅上面两个模型）
+  22:00 ～ 24:00     八折 ×0.8     打：基础 + 超出参考图
+  00:00 ～ 08:00     五折 ×0.5     打：基础 + 超出参考图
+  08:00 ～ 22:00     原价
+
+速算（1张图、无比例加收）
+                 白天        22点八折      0点五折
+  768P  5秒      $0.35       $0.28        $0.175
+  768P  15秒     $1.05       $0.84        $0.525
+  1080P 5秒      $0.55       $0.44        $0.275
+  1080P 15秒     $1.65       $1.32        $0.825
+
+举例
+  768P 5秒 + 9张图（白天）= $0.35 + 4×$0.10 = $0.75
+  768P 5秒 + 9张图（五折）= ($0.35+$0.40)×0.5 = $0.375
+  768P 4:3 5秒（白天）    = $0.07×5 + $0.005×5 = $0.375
+  768P 4:3 5秒（五折）    = $0.07×5×0.5 + $0.005×5 = $0.20
+
+
+二、怎么调
+----------
+创建  POST https://snumom.com/v1/videos
+查询  GET  https://snumom.com/v1/videos/{id}
+下载  GET  https://snumom.com/v1/videos/{id}/content
+
+三个接口都要带：
+  Authorization: Bearer sk-你的Key
+创建还要：
+  Content-Type: application/json
+
+创建成功返回 id（如 task_xxx）。用这个 id 轮询，不要拿上游的 task-xxx 来查网关。
+status：
+  queued / in_progress / unknown  = 还在排队或生成（unknown 不是失败）
+  completed                       = 成功；视频在 metadata.url，或 GET .../content
+  failed / error                  = 失败，预扣会退
+
+1080P 排队几分钟到十几分钟都正常。
+
+
+三、请求字段
+------------
+model / prompt / size  必填
+seconds  可选，4～15；JSON 里写 5 或 "5" 都可以。不传 = 5 秒
+size     宽x高。请直接用第四节表格（计费按表内比例识别）
+         允许：1:1  2:3  3:2  3:4  4:3  9:16  16:9  21:9
+         只传 size，不要再传 resolution、aspect_ratio
+         minimax_h3-768p 只能用 768P 列的 size，传 1080P 的 size 会 400
+         minimax_h3-1080p 用 1080P 列
+
+参考（可选）：
+  图≤9  视频≤3（每条2～15秒）  音频≤3（每条2～15秒）  合计≤12
+  URL 必须是公网 http/https，端口只能 80 或 443
+  只用下面三个字段，不要再写 images / input_reference / input_references / image
+  （重复会报 metadata is too long）
+  reference_images  [{"url":"https://...jpg"}]
+  reference_videos  ["https://...mp4"]
+  reference_audios  ["https://...mp3"]
+
+
+四、size 对照（两列不要混用）
+-------------
+比例     768P（仅 768p 模型）   1080P（仅 1080p 模型）
+16:9     1376x768        1920x1080
+9:16     768x1376        1080x1920
+1:1      1024x1024       1440x1440
+4:3      1152x864        1664x1248     ← 768P 有比例加收
+3:4      864x1152        1248x1664     ← 768P 有比例加收
+3:2      1248x832        1728x1152     ← 768P 有比例加收
+2:3      832x1248        1152x1728     ← 768P 有比例加收
+21:9     1792x768        暂不建议（2560x1088 会创建失败）
+
+
+五、示例
+--------
+POST https://snumom.com/v1/videos
+
+768P：
+{"model":"minimax_h3-768p","prompt":"人物看镜头，轻微转头","seconds":"5","size":"1376x768","reference_images":[{"url":"https://你的图.jpg"}]}
+
+不写 seconds 时效果与上面相同（默认 5 秒）。
+1080P：model 改 minimax_h3-1080p，size 改 1920x1080。
+
+查询：
+GET https://snumom.com/v1/videos/task_xxx
+Header: Authorization: Bearer sk-你的Key

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { generateWithSora } from '@/lib/sora';
 import { generateImage, type ImageGenerateRequest } from '@/lib/image-generator';
-import { saveMediaAsync } from '@/lib/media-storage';
+import { saveMediaAsync, saveVideoMediaPreferS3 } from '@/lib/media-storage';
 import { getSystemConfig, getVideoChannel, getVideoChannels } from '@/lib/db';
 import { fetchWithRetry } from '@/lib/http-retry';
 import { generateId } from '@/lib/utils';
@@ -557,7 +557,7 @@ export async function POST(request: NextRequest) {
           videoConfigObject: normalizedVideoConfigObject,
           video_config: normalizedVideoConfigObject,
         });
-        const outputUrl = await saveMediaAsync(`v1-video-${completionId}`, result.url, { publicBaseUrl: origin });
+        const outputUrl = await saveVideoMediaPreferS3(`v1-video-${completionId}`, result.url, { publicBaseUrl: origin });
         const content = buildChatResponseContent('video', outputUrl);
         return NextResponse.json({
           id: completionId,
@@ -619,7 +619,7 @@ export async function POST(request: NextRequest) {
             }
           );
 
-          const outputUrl = await saveMediaAsync(`v1-video-${completionId}`, result.url, { publicBaseUrl: origin });
+          const outputUrl = await saveVideoMediaPreferS3(`v1-video-${completionId}`, result.url, { publicBaseUrl: origin });
           const content = buildChatResponseContent('video', outputUrl);
           send(
             buildChatChunk({

@@ -17,6 +17,7 @@ const VIDEO_CHANNEL_TYPES: VideoChannelType[] = [
   'openai-compatible',
   'flow2api',
   'grok2api',
+  'minimax-h3',
 ];
 
 const VIDEO_CHANNEL_TYPE_ALIASES: Record<string, VideoChannelType> = {
@@ -30,6 +31,10 @@ const VIDEO_CHANNEL_TYPE_ALIASES: Record<string, VideoChannelType> = {
   flow2api: 'flow2api',
   flow2apiw: 'flow2api',
   grok2api: 'grok2api',
+  'minimax-h3': 'minimax-h3',
+  minimax_h3: 'minimax-h3',
+  minimax: 'minimax-h3',
+  snumom: 'minimax-h3',
 };
 
 function normalizeVideoChannelType(input: unknown): VideoChannelType | null {

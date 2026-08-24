@@ -9,7 +9,9 @@ export const dynamic = 'force-dynamic';
 function convertToMediaUrl(resultUrl: string | undefined, id: string, type: string): string {
   if (!resultUrl) return '';
 
-  if (type.includes('video')) {
+  const isHttpUrl = resultUrl.startsWith('http://') || resultUrl.startsWith('https://');
+
+  if (type.includes('video') && !isHttpUrl) {
     return `/api/media/${id}`;
   }
 

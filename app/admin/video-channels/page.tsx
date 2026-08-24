@@ -21,6 +21,7 @@ const CHANNEL_TYPES: { value: VideoChannelType; label: string }[] = [
   { value: 'openai-compatible', label: 'OpenAI 流式' },
   { value: 'flow2api', label: 'Flow2API' },
   { value: 'grok2api', label: 'Grok2API' },
+  { value: 'minimax-h3', label: 'Minimax H3' },
 ];
 
 const DEFAULT_FEATURES: VideoModelFeatures = {
@@ -91,6 +92,41 @@ const GROK_TEMPLATE_VIDEO_CONFIG_OBJECT: VideoConfigObject = {
   resolution: 'HD',
   preset: 'normal',
 };
+
+const MINIMAX_H3_ASPECT_RATIOS_768P: AspectRatioRow[] = [
+  { value: '16:9', label: '16:9' },
+  { value: '9:16', label: '9:16' },
+  { value: '1:1', label: '1:1' },
+  { value: '4:3', label: '4:3' },
+  { value: '3:4', label: '3:4' },
+  { value: '3:2', label: '3:2' },
+  { value: '2:3', label: '2:3' },
+  { value: '21:9', label: '21:9' },
+];
+
+const MINIMAX_H3_ASPECT_RATIOS_1080P: AspectRatioRow[] = [
+  { value: '16:9', label: '16:9' },
+  { value: '9:16', label: '9:16' },
+  { value: '1:1', label: '1:1' },
+  { value: '4:3', label: '4:3' },
+  { value: '3:4', label: '3:4' },
+  { value: '3:2', label: '3:2' },
+  { value: '2:3', label: '2:3' },
+];
+
+const MINIMAX_H3_DURATIONS_768P: VideoDuration[] = [
+  { value: '4s', label: '4s', cost: 28 },
+  { value: '5s', label: '5s', cost: 35 },
+  { value: '10s', label: '10s', cost: 70 },
+  { value: '15s', label: '15s', cost: 105 },
+];
+
+const MINIMAX_H3_DURATIONS_1080P: VideoDuration[] = [
+  { value: '4s', label: '4s', cost: 44 },
+  { value: '5s', label: '5s', cost: 55 },
+  { value: '10s', label: '10s', cost: 110 },
+  { value: '15s', label: '15s', cost: 165 },
+];
 
 function parseDurationToSeconds(duration: string): number {
   const matched = (duration || '').match(/(\d+)/);
@@ -176,6 +212,49 @@ function buildSoraTemplateModelPayload(channelId: string) {
   };
 }
 
+function buildMinimaxH3TemplateModelPayloads(channelId: string) {
+  return [
+    {
+      channelId,
+      name: 'Minimax H3 768P',
+      description: 'snumom /v1/videos, 4-15s, supports text-to-video and public image references',
+      apiModel: 'minimax_h3-768p',
+      features: {
+        textToVideo: true,
+        imageToVideo: true,
+        videoToVideo: false,
+        supportStyles: false,
+      },
+      aspectRatios: [...MINIMAX_H3_ASPECT_RATIOS_768P],
+      durations: [...MINIMAX_H3_DURATIONS_768P],
+      defaultAspectRatio: '16:9',
+      defaultDuration: '5s',
+      highlight: true,
+      enabled: true,
+      sortOrder: 0,
+    },
+    {
+      channelId,
+      name: 'Minimax H3 1080P',
+      description: 'snumom /v1/videos, 4-15s, higher resolution preset',
+      apiModel: 'minimax_h3-1080p',
+      features: {
+        textToVideo: true,
+        imageToVideo: true,
+        videoToVideo: false,
+        supportStyles: false,
+      },
+      aspectRatios: [...MINIMAX_H3_ASPECT_RATIOS_1080P],
+      durations: [...MINIMAX_H3_DURATIONS_1080P],
+      defaultAspectRatio: '16:9',
+      defaultDuration: '5s',
+      highlight: false,
+      enabled: true,
+      sortOrder: 1,
+    },
+  ];
+}
+
 function buildManualTemplateModelPayload(channel: VideoChannel) {
   if (channel.type === 'grok2api') {
     return {
@@ -244,6 +323,30 @@ function buildManualTemplateModelPayload(channel: VideoChannel) {
         ...GROK_TEMPLATE_VIDEO_CONFIG_OBJECT,
       },
       highlight: false,
+      enabled: true,
+      sortOrder: 0,
+    };
+  }
+
+  if (channel.type === 'minimax-h3') {
+    return {
+      name: 'Minimax H3 768P',
+      description: 'snumom /v1/videos model, use public URLs for image references',
+      apiModel: 'minimax_h3-768p',
+      baseUrl: '',
+      apiKey: '',
+      features: {
+        textToVideo: true,
+        imageToVideo: true,
+        videoToVideo: false,
+        supportStyles: false,
+      },
+      defaultAspectRatio: '16:9',
+      defaultDuration: '5s',
+      videoConfigObject: {
+        ...GROK_TEMPLATE_VIDEO_CONFIG_OBJECT,
+      },
+      highlight: true,
       enabled: true,
       sortOrder: 0,
     };
@@ -430,11 +533,15 @@ export default function VideoChannelsPage() {
     setAspectRatioRows(
       channel.type === 'grok2api'
         ? [...GROK_TEMPLATE_ASPECT_RATIOS]
+        : channel.type === 'minimax-h3'
+        ? [...MINIMAX_H3_ASPECT_RATIOS_768P]
         : [...DEFAULT_ASPECT_RATIOS]
     );
     setDurationRows(
       channel.type === 'grok2api'
         ? [...GROK_TEMPLATE_DURATIONS]
+        : channel.type === 'minimax-h3'
+        ? [...MINIMAX_H3_DURATIONS_768P]
         : [...DEFAULT_DURATIONS]
     );
     setModelChannelId(channelId);
@@ -449,34 +556,53 @@ export default function VideoChannelsPage() {
       return false;
     }
 
-    let templatePayload:
+    type TemplateModelPayload =
       | ReturnType<typeof buildGrokTemplateModelPayload>
       | ReturnType<typeof buildSoraTemplateModelPayload>
-      | null = null;
+      | ReturnType<typeof buildMinimaxH3TemplateModelPayloads>[number];
+
+    let templatePayload: TemplateModelPayload | null = null;
+    let templatePayloads: TemplateModelPayload[] = [];
 
     if (channel.type === 'grok2api') {
       templatePayload = buildGrokTemplateModelPayload(channel.id);
     } else if (channel.type === 'sora' || channel.type === 'apexerapi') {
       templatePayload = buildSoraTemplateModelPayload(channel.id);
+    } else if (channel.type === 'minimax-h3') {
+      templatePayloads = buildMinimaxH3TemplateModelPayloads(channel.id);
     }
 
-    if (!templatePayload) {
+    if (templatePayload) {
+      templatePayloads = [templatePayload];
+    }
+
+    if (templatePayloads.length === 0) {
       return false;
     }
 
-    const templateRes = await fetch('/api/admin/video-models', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(templatePayload),
-    });
-    if (!templateRes.ok) {
-      const templateData = await templateRes.json().catch(() => ({}));
-      throw new Error(templateData.error || '\u81ea\u52a8\u521b\u5efa\u6a21\u677f\u6a21\u578b\u5931\u8d25');
+    for (const payload of templatePayloads) {
+      const templateRes = await fetch('/api/admin/video-models', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (!templateRes.ok) {
+        const templateData = await templateRes.json().catch(() => ({}));
+        throw new Error(templateData.error || 'Failed to create template model');
+      }
     }
 
     toast({
-      title: channel.type === 'grok2api' ? '\u5df2\u81ea\u52a8\u6dfb\u52a0 Grok \u6a21\u677f' : '\u5df2\u81ea\u52a8\u6dfb\u52a0 Sora \u6a21\u677f',
-      description: channel.type === 'grok2api' ? '\u9ed8\u8ba4\u5e26 5/10/15/30 \u79d2\u548c HD \u914d\u7f6e' : '\u5e38\u7528\u7684 Sora \u6a21\u578b\u5df2\u81ea\u52a8\u8865\u9f50',
+      title: channel.type === 'minimax-h3'
+        ? 'Added Minimax H3 templates'
+        : channel.type === 'grok2api'
+        ? '\u5df2\u81ea\u52a8\u6dfb\u52a0 Grok \u6a21\u677f'
+        : '\u5df2\u81ea\u52a8\u6dfb\u52a0 Sora \u6a21\u677f',
+      description: channel.type === 'minimax-h3'
+        ? 'Created 768P and 1080P models.'
+        : channel.type === 'grok2api'
+        ? '\u9ed8\u8ba4\u5e26 5/10/15/30 \u79d2\u548c HD \u914d\u7f6e'
+        : '\u5e38\u7528\u7684 Sora \u6a21\u578b\u5df2\u81ea\u52a8\u8865\u9f50',
     });
     return true;
   };
@@ -903,6 +1029,7 @@ export default function VideoChannelsPage() {
           {channelForm.type === 'apexerapi' && '\u9002\u7528\u4e8e adobe2api /v1/videos\uff0c\u4fdd\u5b58\u540e\u4f1a\u81ea\u52a8\u8865\u4e00\u6761 sora-2 \u9ed8\u8ba4\u6a21\u578b\u3002'}
           {channelForm.type === 'sora' && '\u4fdd\u5b58\u6e20\u9053\u540e\u4f1a\u81ea\u52a8\u8865\u4e00\u6761 Sora \u9ed8\u8ba4\u6a21\u578b\uff0c\u901a\u5e38\u4e0d\u9700\u8981\u624b\u5de5\u586b\u5199\u7b2c\u4e00\u6761\u6a21\u578b\u3002'}
           {channelForm.type === 'openai-compatible' && '\u9002\u7528\u4e8e\u517c\u5bb9 /v1/chat/completions \u7684\u89c6\u9891\u63a5\u53e3\u3002\u5148\u5efa\u6e20\u9053\uff0c\u518d\u6309\u5b9e\u9645\u6a21\u578b ID \u8865\u5145\u6a21\u578b\u5373\u53ef\u3002'}
+          {channelForm.type === 'minimax-h3' && 'Use snumom /v1/videos. Base URL can stay empty to use https://snumom.com. Image references require a public image bucket URL.'}
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -1007,6 +1134,7 @@ export default function VideoChannelsPage() {
               {selectedChannel.type === 'apexerapi' && '\u5df2\u6309 adobe2api sora-2 \u9884\u586b\uff0cSanHub \u4f1a\u628a sora-video / sora2-* \u8bf7\u6c42\u8f6c\u6210 sora-2\u3002'}
               {selectedChannel.type === 'sora' && '\u5df2\u6309 Sora \u5e38\u7528\u6a21\u677f\u9884\u586b\uff0c\u901a\u5e38\u53ea\u9700\u8981\u786e\u8ba4\u540d\u79f0\u3001\u9ed8\u8ba4\u65f6\u957f\u548c\u4ef7\u683c\u5373\u53ef\u4fdd\u5b58\u3002'}
               {selectedChannel.type === 'openai-compatible' && '\u6a21\u578b\u7ea7 Base URL / API Key \u53ef\u4ee5\u7559\u7a7a\uff0c\u4fdd\u5b58\u65f6\u4f1a\u81ea\u52a8\u7ee7\u627f\u6e20\u9053\u4e0a\u7684\u914d\u7f6e\u3002'}
+              {selectedChannel.type === 'minimax-h3' && 'Minimax H3 supports 4-15s. Use minimax_h3-768p with 768P sizes and minimax_h3-1080p with 1080P sizes.'}
             </div>
           )}
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">

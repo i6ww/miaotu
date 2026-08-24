@@ -85,6 +85,7 @@ const VIDEO_CHANNEL_BADGE_LABELS: Record<string, string> = {
   grok2api: 'Grok 视频',
   flow2api: 'Veo 视频',
   'openai-compatible': 'OpenAI 视频',
+  'minimax-h3': 'Minimax H3',
 };
 
 const IMAGE_CHANNEL_BADGE_LABELS: Record<string, string> = {
@@ -119,6 +120,7 @@ const getImageBadge = (channelType?: string, fallbackType?: string): Badge => ({
 const inferVideoBadge = (model?: string): Badge => {
   const lower = (model || '').toLowerCase();
   if (lower.includes('grok')) return getVideoBadge('grok2api');
+  if (lower.includes('minimax_h3') || lower.includes('minimax-h3')) return getVideoBadge('minimax-h3');
   if (lower.startsWith('veo_') || lower.includes('veo')) return getVideoBadge('flow2api');
   if (lower.includes('sora')) return getVideoBadge('sora');
   return FALLBACK_VIDEO_BADGE;

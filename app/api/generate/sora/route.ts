@@ -2,14 +2,16 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth';
-import { generateWithSora } from '@/lib/sora';
-import { saveGeneration, updateUserBalance, getUserById, updateGeneration, getSystemConfig, refundGenerationBalance } from '@/lib/db';
+import { generateWithSora, resolveVideoGenerationCost } from '@/lib/sora';
+import { saveGeneration, updateUserBalance, getUserById, updateGeneration, getSystemConfig, refundGenerationBalance, getVideoModelWithChannel } from '@/lib/db';
 import type { Generation, SoraGenerateRequest } from '@/types';
 import { checkRateLimit } from '@/lib/rate-limit';
 import { fetchReferenceImage } from '@/lib/reference-image';
 import { processVideoPrompt } from '@/lib/prompt-processor';
 import { assertPromptsAllowed, isPromptBlockedError } from '@/lib/prompt-blocklist';
-import { saveMediaAsync } from '@/lib/media-storage';
+import { saveVideoMediaPreferS3 } from '@/lib/media-storage';
+import { validateMinimaxH3ReferenceMediaDuration } from '@/lib/audio-duration';
+import { fetchWithRetry } from '@/lib/http-retry';
 
 function normalizeIncomingVideoConfigObject(input: SoraGenerateRequest): SoraGenerateRequest['videoConfigObject'] {
   const raw = (input.videoConfigObject || input.video_config) as Record<string, unknown> | undefined;
@@ -17,12 +19,12 @@ function normalizeIncomingVideoConfigObject(input: SoraGenerateRequest): SoraGen
 
   const output: NonNullable<SoraGenerateRequest['videoConfigObject']> = {};
 
-  if (typeof raw.aspect_ratio === 'string' && ['16:9', '9:16', '1:1', '2:3', '3:2'].includes(raw.aspect_ratio.trim())) {
+  if (typeof raw.aspect_ratio === 'string' && ['16:9', '9:16', '1:1', '2:3', '3:2', '3:4', '4:3', '21:9'].includes(raw.aspect_ratio.trim())) {
     output.aspect_ratio = raw.aspect_ratio.trim() as NonNullable<SoraGenerateRequest['videoConfigObject']>['aspect_ratio'];
   }
 
   if (typeof raw.video_length === 'number' && Number.isFinite(raw.video_length)) {
-    output.video_length = Math.max(5, Math.min(30, Math.floor(raw.video_length)));
+    output.video_length = Math.max(4, Math.min(30, Math.floor(raw.video_length)));
   }
 
   if (typeof raw.resolution === 'string') {
@@ -43,13 +45,132 @@ function normalizeIncomingVideoConfigObject(input: SoraGenerateRequest): SoraGen
 }
 
 // 配置路由段选项
-export const maxDuration = 60;
+export const maxDuration = 600;
 export const dynamic = 'force-dynamic';
 
 const MAX_REFERENCE_IMAGE_BYTES = 50 * 1024 * 1024;
 const RATE_LIMIT_RETRIES = 3;
 const RATE_LIMIT_BASE_DELAY_MS = 1500;
 const RATE_LIMIT_MAX_DELAY_MS = 10000;
+const MAX_MINIMAX_REFERENCE_IMAGES = 9;
+const MAX_REFERENCE_VIDEO_URLS = 3;
+const MAX_REFERENCE_AUDIO_URLS = 3;
+const MAX_TOTAL_MINIMAX_REFERENCES = 12;
+const MAX_REFERENCE_VIDEO_BYTES = 200 * 1024 * 1024;
+const MAX_REFERENCE_AUDIO_BYTES = 50 * 1024 * 1024;
+
+type ReferenceMediaKind = 'video' | 'audio';
+
+function normalizeReferenceUrls(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+
+  const urls: string[] = [];
+  for (const item of value) {
+    if (typeof item !== 'string') continue;
+    const trimmed = item.trim();
+    if (!trimmed || urls.includes(trimmed)) continue;
+    urls.push(trimmed);
+  }
+
+  return urls;
+}
+
+function isPublicReferenceUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    const hostname = url.hostname.toLowerCase();
+    const isPublicProtocol = url.protocol === 'http:' || url.protocol === 'https:';
+    const hasAllowedPort = !url.port || url.port === '80' || url.port === '443';
+    return isPublicProtocol && hasAllowedPort && hostname !== 'localhost' && !hostname.endsWith('.localhost');
+  } catch {
+    return false;
+  }
+}
+
+function getReferenceFilenameFromUrl(value: string): string | undefined {
+  try {
+    const url = new URL(value);
+    const basename = url.pathname.replace(/\\/g, '/').split('/').pop();
+    return basename || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function fetchRemoteReferenceMedia(
+  url: string,
+  kind: ReferenceMediaKind
+): Promise<{ buffer: Buffer; mimeType: string; filename?: string }> {
+  const maxBytes = kind === 'video' ? MAX_REFERENCE_VIDEO_BYTES : MAX_REFERENCE_AUDIO_BYTES;
+  const response = await fetchWithRetry(fetch, url, () => ({
+    method: 'GET',
+    headers: {
+      Accept: kind === 'video' ? 'video/*,application/x-mpegurl,*/*' : 'audio/*,*/*',
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+    },
+  }), {
+    attempts: 3,
+    baseDelayMs: 500,
+    maxDelayMs: 4000,
+  });
+
+  if (!response.ok) {
+    const details = await response.text().catch(() => '');
+    const kindName = kind === 'video' ? '视频' : '音频';
+    throw new Error(`参考${kindName}下载失败（${response.status}）${details ? `：${details.slice(0, 200)}` : ''}`);
+  }
+
+  const contentLength = Number(response.headers.get('content-length') || 0);
+  if (contentLength > maxBytes) {
+    const kindName = kind === 'video' ? '视频' : '音频';
+    throw new Error(`参考${kindName}大小不能超过 ${Math.floor(maxBytes / 1024 / 1024)}MB`);
+  }
+
+  const arrayBuffer = await response.arrayBuffer();
+  const buffer = Buffer.from(arrayBuffer);
+  if (buffer.length <= 0) {
+    const kindName = kind === 'video' ? '视频' : '音频';
+    throw new Error(`参考${kindName}文件为空`);
+  }
+  if (buffer.length > maxBytes) {
+    const kindName = kind === 'video' ? '视频' : '音频';
+    throw new Error(`参考${kindName}大小不能超过 ${Math.floor(maxBytes / 1024 / 1024)}MB`);
+  }
+
+  return {
+    buffer,
+    mimeType: response.headers.get('content-type')?.split(';')[0]?.trim().toLowerCase() || 'application/octet-stream',
+    filename: getReferenceFilenameFromUrl(url),
+  };
+}
+
+async function validateRemoteReferenceMediaDurations(
+  urls: string[],
+  kind: ReferenceMediaKind
+): Promise<string | null> {
+  for (const url of urls) {
+    try {
+      const media = await fetchRemoteReferenceMedia(url, kind);
+      const validation = validateMinimaxH3ReferenceMediaDuration(
+        kind,
+        media.buffer,
+        media.mimeType,
+        media.filename
+      );
+      if (!validation.ok) {
+        const kindName = kind === 'video' ? '视频' : '音频';
+        return `${validation.error || `参考${kindName}时长不符合要求`}：${url}`;
+      }
+    } catch (error) {
+      const kindName = kind === 'video' ? '视频' : '音频';
+      return error instanceof Error
+        ? `${error.message}：${url}`
+        : `参考${kindName}校验失败：${url}`;
+    }
+  }
+
+  return null;
+}
 
 function isRateLimitError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
@@ -108,6 +229,8 @@ async function processGenerationTask(
       aspectRatio: body.aspectRatio,
       duration: body.duration,
       videoConfigObject: body.videoConfigObject,
+      referenceVideoUrls: body.referenceVideoUrls,
+      referenceAudioUrls: body.referenceAudioUrls,
     };
     let promptParams: {
       originalPrompt?: string;
@@ -178,7 +301,7 @@ async function processGenerationTask(
     // 调用 Sora API 生成内容
     const result = await generateWithRateLimitRetry(processedBody, onProgress, generationId);
 
-    const savedUrl = await saveMediaAsync(generationId, result.url, { publicBaseUrl });
+    const savedUrl = await saveVideoMediaPreferS3(generationId, result.url, { publicBaseUrl });
 
     console.log(`[Task ${generationId}] 生成成功:`, savedUrl);
 
@@ -258,10 +381,47 @@ export async function POST(request: NextRequest) {
     const hasPrompt = Boolean(body.prompt && body.prompt.trim());
     const hasFiles = Boolean(body.files && body.files.length > 0);
     const hasReferenceUrl = Boolean(body.referenceImageUrl);
+    const referenceVideoUrls = normalizeReferenceUrls(body.referenceVideoUrls);
+    const referenceAudioUrls = normalizeReferenceUrls(body.referenceAudioUrls);
 
-    if (!hasPrompt && !hasFiles && !hasReferenceUrl) {
+    if (!hasPrompt && !hasFiles && !hasReferenceUrl && referenceVideoUrls.length === 0 && referenceAudioUrls.length === 0) {
       return NextResponse.json(
         { error: '请输入提示词或上传参考文件' },
+        { status: 400 }
+      );
+    }
+
+    if (referenceVideoUrls.length > MAX_REFERENCE_VIDEO_URLS) {
+      return NextResponse.json(
+        { error: `参考视频最多 ${MAX_REFERENCE_VIDEO_URLS} 条` },
+        { status: 400 }
+      );
+    }
+
+    if (referenceAudioUrls.length > MAX_REFERENCE_AUDIO_URLS) {
+      return NextResponse.json(
+        { error: `参考音频最多 ${MAX_REFERENCE_AUDIO_URLS} 条` },
+        { status: 400 }
+      );
+    }
+
+    const invalidReferenceUrl = [...referenceVideoUrls, ...referenceAudioUrls].find(
+      (url) => !isPublicReferenceUrl(url)
+    );
+    if (invalidReferenceUrl) {
+      return NextResponse.json(
+        { error: `Invalid public reference URL: ${invalidReferenceUrl}` },
+        { status: 400 }
+      );
+    }
+
+    const selectedModelConfig = body.modelId ? await getVideoModelWithChannel(body.modelId) : null;
+    const selectedModel = selectedModelConfig?.model || null;
+    const selectedChannelType = selectedModelConfig?.channel.type;
+    const hasVideoOrAudioReferences = referenceVideoUrls.length > 0 || referenceAudioUrls.length > 0;
+    if (hasVideoOrAudioReferences && selectedChannelType !== 'minimax-h3') {
+      return NextResponse.json(
+        { error: '当前模型不支持视频或音频参考' },
         { status: 400 }
       );
     }
@@ -275,6 +435,9 @@ export async function POST(request: NextRequest) {
       videoConfigObject: normalizedVideoConfigObject,
       video_config: normalizedVideoConfigObject,
       files: body.files ? [...body.files] : [],
+      publicBaseUrl: origin,
+      referenceVideoUrls,
+      referenceAudioUrls,
     };
 
     if (body.referenceImageUrl) {
@@ -293,6 +456,49 @@ export async function POST(request: NextRequest) {
       });
     }
 
+    if (selectedChannelType === 'minimax-h3') {
+      const referenceImageCount = (normalizedBody.files || []).filter(
+        (file) => file.mimeType.startsWith('image/')
+      ).length;
+      const totalReferenceCount = referenceImageCount + referenceVideoUrls.length + referenceAudioUrls.length;
+
+      if (referenceImageCount > MAX_MINIMAX_REFERENCE_IMAGES) {
+        return NextResponse.json(
+          { error: `参考图片最多 ${MAX_MINIMAX_REFERENCE_IMAGES} 张` },
+          { status: 400 }
+        );
+      }
+
+      if (totalReferenceCount > MAX_TOTAL_MINIMAX_REFERENCES) {
+        return NextResponse.json(
+          { error: `参考素材合计最多 ${MAX_TOTAL_MINIMAX_REFERENCES} 个` },
+          { status: 400 }
+        );
+      }
+
+      const invalidReferenceVideoDuration = await validateRemoteReferenceMediaDurations(
+        referenceVideoUrls,
+        'video'
+      );
+      if (invalidReferenceVideoDuration) {
+        return NextResponse.json(
+          { error: invalidReferenceVideoDuration },
+          { status: 400 }
+        );
+      }
+
+      const invalidReferenceAudioDuration = await validateRemoteReferenceMediaDurations(
+        referenceAudioUrls,
+        'audio'
+      );
+      if (invalidReferenceAudioDuration) {
+        return NextResponse.json(
+          { error: invalidReferenceAudioDuration },
+          { status: 400 }
+        );
+      }
+    }
+
     // 获取最新用户信息
     const user = await getUserById(session.user.id);
     if (!user) {
@@ -300,15 +506,11 @@ export async function POST(request: NextRequest) {
     }
 
     // 预估成本
-    const normalizedDuration = (body.duration || body.model || '').toLowerCase();
-    const effectiveDurationSeconds = normalizedVideoConfigObject?.video_length;
-    const estimatedCost = normalizedDuration.includes('25')
-      ? systemConfig.pricing.soraVideo25s
-      : effectiveDurationSeconds && effectiveDurationSeconds >= 15
-        ? systemConfig.pricing.soraVideo15s
-        : normalizedDuration.includes('15')
-        ? systemConfig.pricing.soraVideo15s
-        : systemConfig.pricing.soraVideo10s;
+    const estimatedCost = resolveVideoGenerationCost(
+      systemConfig.pricing,
+      normalizedBody,
+      selectedModel || undefined
+    );
 
     // 检查余额
     if (user.balance < estimatedCost) {
@@ -347,6 +549,8 @@ export async function POST(request: NextRequest) {
           aspectRatio: body.aspectRatio,
           duration: body.duration,
           videoConfigObject: normalizedVideoConfigObject,
+          referenceVideoUrls,
+          referenceAudioUrls,
           progress: 0,
         },
         resultUrl: '',
