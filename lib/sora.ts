@@ -991,6 +991,24 @@ function extractMinimaxH3Error(payload: unknown): string | null {
   return null;
 }
 
+function isMinimaxH3FailureMessage(message: string | null): boolean {
+  if (!message) return false;
+  const text = message.toLowerCase();
+  return (
+    text.includes('upstream returned unrecognized message') ||
+    text.includes('generation failed') ||
+    text.includes('failed') ||
+    text.includes('error') ||
+    text.includes('invalid') ||
+    text.includes('rejected') ||
+    text.includes('unsupported') ||
+    text.includes('unauthorized') ||
+    text.includes('forbidden') ||
+    text.includes('insufficient') ||
+    text.includes('quota')
+  );
+}
+
 function extractMinimaxH3VideoUrl(payload: unknown, baseUrl: string): string | null {
   const candidates = [
     getObjectValue(payload, ['metadata', 'url']),
@@ -1080,6 +1098,7 @@ async function waitForMinimaxH3Task(
     }
 
     const status = extractMinimaxH3Status(payload);
+    const errorMessage = extractMinimaxH3Error(payload);
     if (status === 'completed') {
       onProgress?.(95);
       const videoUrl = extractMinimaxH3VideoUrl(payload, baseUrl);
@@ -1087,7 +1106,16 @@ async function waitForMinimaxH3Task(
     }
 
     if (status === 'failed' || status === 'error') {
-      throw new Error(extractMinimaxH3Error(payload) || 'Minimax H3 generation failed');
+      throw new Error(errorMessage || 'Minimax H3 generation failed');
+    }
+
+    if (isMinimaxH3FailureMessage(errorMessage)) {
+      logWarn('[Video Adapter] Minimax H3 terminal error message detected:', {
+        taskId,
+        status,
+        errorMessage,
+      });
+      throw new Error(errorMessage || 'Minimax H3 generation failed');
     }
 
     const elapsedRatio = Math.min(1, (Date.now() - startedAt) / MINIMAX_H3_MAX_WAIT_MS);
