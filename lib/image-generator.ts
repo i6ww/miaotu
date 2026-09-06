@@ -20,9 +20,13 @@ import type { GenerateResult } from '@/types';
 export interface ImageGenerateRequest {
   modelId: string;
   prompt: string;
+  operation?: 'generation' | 'edit';
   size?: string;
   aspectRatio?: string;
   imageSize?: string;
+  outputResolution?: string;
+  outputFormat?: string;
+  responseFormat?: string;
   quality?: string;
   images?: Array<{ mimeType: string; data: string }>;
   idempotencyKey?: string;
@@ -414,32 +418,34 @@ function isGeminiCompatibleImageModel(model: string): boolean {
 function normalizeGeminiNativeModel(apiModel: string, baseUrl: string): string {
   const model = apiModel.trim();
   const lower = model.toLowerCase();
-  const isGoogleNative = isGoogleGeminiNativeBaseUrl(baseUrl);
-
-  if (!isGoogleNative) {
-    if (/^gemini-3\.0-pro-image-(square|landscape|portrait|four-three|three-four)(-2k|-4k)?$/.test(lower)) {
-      return 'gemini_3.0_pro_image_preview';
-    }
-    return model;
-  }
-
-  if (/^gemini-3\.0-pro-image-(square|landscape|portrait|four-three|three-four)(-2k|-4k)?$/.test(lower)) {
-    return 'gemini-3-pro-image-preview';
-  }
 
   const aliases: Record<string, string> = {
     'gemini_3_pro_image_preview': 'gemini-3-pro-image-preview',
     'gemini_3.0_pro_image_preview': 'gemini-3-pro-image-preview',
     'gemini-3.0-pro-image-preview': 'gemini-3-pro-image-preview',
+    'gemini_3_pro_image': 'gemini-3-pro-image',
+    'gemini_3.0_pro_image': 'gemini-3-pro-image',
+    'gemini-3.0-pro-image': 'gemini-3-pro-image',
     'nano-banana-pro': 'gemini-3-pro-image-preview',
     'banana-pro': 'gemini-3-pro-image-preview',
+    'nano-banana': 'gemini-2.5-flash-image',
+    'banana': 'gemini-2.5-flash-image',
     'gemini_3.1_flash_image_preview': 'gemini-3.1-flash-image-preview',
     'nano-banana-2': 'gemini-3.1-flash-image-preview',
     'banana2': 'gemini-3.1-flash-image-preview',
     'banana-2': 'gemini-3.1-flash-image-preview',
   };
 
-  return aliases[lower] || model;
+  const aliased = aliases[lower];
+  if (aliased) return aliased;
+
+  if (/^gemini-3\.0-pro-image-(square|landscape|portrait|four-three|three-four)(-2k|-4k)?$/.test(lower)) {
+    return isGoogleGeminiNativeBaseUrl(baseUrl)
+      ? 'gemini-3-pro-image-preview'
+      : 'gemini-3-pro-image-preview';
+  }
+
+  return model;
 }
 
 function inferGeminiImageSize(size?: string): string | undefined {
@@ -668,6 +674,103 @@ async function generateWithOpenAIEdits(
     url: resultUrl,
     cost: 0,
   };
+}
+
+function buildGeminiNativeContents(
+  request: ImageGenerateRequest,
+): Array<{
+  role: 'user';
+  parts: Array<{ text?: string; inlineData?: { mimeType: string; data: string } }>;
+}> {
+  if (!request.prompt) {
+    throw new Error('Gemini native image generation requires a prompt');
+  }
+
+  const parts: Array<{ text?: string; inlineData?: { mimeType: string; data: string } }> = [
+    { text: request.prompt },
+  ];
+
+  const images = request.images || [];
+  for (const image of images) {
+    const data = image.data.replace(/^data:[^;]+;base64,/, '');
+    parts.push({
+      inlineData: {
+        mimeType: image.mimeType || 'image/jpeg',
+        data,
+      },
+    });
+  }
+
+  return [{ role: 'user', parts }];
+}
+
+function buildGeminiNativeGenerationConfig(
+  request: ImageGenerateRequest,
+  target: ResolvedImageTarget
+): Record<string, unknown> {
+  const imageConfig: Record<string, unknown> = {};
+
+  const aspectRatio = normalizeAspectRatio(request.aspectRatio) || normalizeAspectRatio(request.size);
+  if (aspectRatio) {
+    imageConfig.aspectRatio = aspectRatio;
+  }
+
+  const imageSize = request.imageSize || inferGeminiImageSize(target.size) || inferGeminiImageSize(request.size);
+  if (imageSize) {
+    imageConfig.imageSize = imageSize;
+  }
+
+  const generationConfig: Record<string, unknown> = {
+    responseModalities: ['TEXT', 'IMAGE'],
+  };
+
+  if (Object.keys(imageConfig).length > 0) {
+    generationConfig.imageConfig = imageConfig;
+  }
+
+  return generationConfig;
+}
+
+async function generateWithZtyunjuanGeminiNative(
+  request: ImageGenerateRequest,
+  baseUrl: string,
+  apiKey: string,
+  target: ResolvedImageTarget,
+  channelId: string
+): Promise<GenerateResult> {
+  const key = getNextApiKey(apiKey, channelId);
+  const model = normalizeGeminiNativeModel(target.model, baseUrl);
+  const url = `${baseUrl.replace(/\/$/, '')}/v1beta/models/${model}:generateContent`;
+
+  const response = await fetchWithRetry(undiciFetch, url, () => ({
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${key}`,
+      'Content-Type': 'application/json',
+      ...(request.idempotencyKey
+        ? {
+            'Idempotency-Key': request.idempotencyKey,
+            'X-Idempotency-Key': request.idempotencyKey,
+          }
+        : {}),
+    },
+    body: JSON.stringify({
+      contents: buildGeminiNativeContents(request),
+      generationConfig: buildGeminiNativeGenerationConfig(request, target),
+    }),
+    dispatcher: imageAgent,
+  }), GENERATION_POST_RETRY_OPTIONS);
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Gemini native API error (${response.status}): ${errorText}`);
+  }
+
+  const data: any = await response.json();
+  const resultUrl = pickGeneratedImage(data);
+  if (!resultUrl) throwMissingImage(data);
+
+  return { type: 'gemini-image', url: resultUrl, cost: 0 };
 }
 
 // ========================================
@@ -1442,6 +1545,15 @@ export async function generateImage(request: ImageGenerateRequest): Promise<Gene
 
   switch (channel.type) {
     case 'apexerapi':
+      result = await generateWithZtyunjuanGeminiNative(
+        request,
+        effectiveBaseUrl,
+        effectiveApiKey,
+        resolvedTarget,
+        channel.id
+      );
+      break;
+
     case 'openai-compatible':
       result = await generateWithOpenAI(
         request,

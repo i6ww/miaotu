@@ -24,6 +24,8 @@ export type ParsedOpenAIImageRequest = {
   imageReferences: string[];
   aspectRatio?: string;
   imageSize?: string;
+  outputResolution?: string;
+  outputFormat?: string;
   quality?: string;
 };
 
@@ -54,6 +56,14 @@ function googleImageConfigFromExtraBody(extraBody: unknown): Record<string, unkn
   const google = parseJsonObject(extra?.google);
   const imageConfig = parseJsonObject(google?.image_config);
   return imageConfig || {};
+}
+
+function isZtyunjuanGeminiModelName(value: string): boolean {
+  return (
+    value === 'gemini-3-pro-image' ||
+    value === 'gemini-3-pro-image-preview' ||
+    value === 'gemini-3.1-flash-image-preview'
+  );
 }
 
 export function normalizeImageReferences(input: unknown): string[] {
@@ -101,9 +111,19 @@ export function normalizeImageReferences(input: unknown): string[] {
 export function collectPayloadImageReferences(payload: Record<string, unknown>): string[] {
   return [
     ...normalizeImageReferences(payload.image),
+    ...normalizeImageReferences(payload['image[]']),
     ...normalizeImageReferences(payload.images),
+    ...normalizeImageReferences(payload['images[]']),
     ...normalizeImageReferences(payload.references),
     ...normalizeImageReferences(payload.input_image),
+    ...normalizeImageReferences(payload.input_reference),
+    ...normalizeImageReferences(payload.inputReference),
+    ...normalizeImageReferences(payload.input_urls),
+    ...normalizeImageReferences(payload.inputUrls),
+    ...normalizeImageReferences(payload.image_url),
+    ...normalizeImageReferences(payload.imageUrl),
+    ...normalizeImageReferences(payload.image_urls),
+    ...normalizeImageReferences(payload.imageUrls),
   ];
 }
 
@@ -167,7 +187,22 @@ export async function loadReferenceImages(
 
 export async function readFormImageReferences(form: FormData): Promise<string[]> {
   const references: string[] = [];
-  const fields = ['image', 'image[]', 'images', 'references', 'input_image', 'input_reference'];
+  const fields = [
+    'image',
+    'image[]',
+    'images',
+    'images[]',
+    'references',
+    'input_image',
+    'input_reference',
+    'inputReference',
+    'input_urls',
+    'inputUrls',
+    'image_url',
+    'imageUrl',
+    'image_urls',
+    'imageUrls',
+  ];
 
   for (const field of fields) {
     const values = form.getAll(field);
@@ -207,6 +242,17 @@ export async function parseOpenAIImageRequest(request: NextRequest): Promise<Par
         googleConfig.image_size,
         googleConfig.imageSize
       ),
+      outputResolution: firstString(
+        form.get('output_resolution'),
+        form.get('outputResolution'),
+        form.get('image_size'),
+        form.get('imageSize'),
+        googleConfig.output_resolution,
+        googleConfig.outputResolution,
+        googleConfig.image_size,
+        googleConfig.imageSize
+      ),
+      outputFormat: firstString(form.get('output_format'), form.get('outputFormat')),
       quality: firstString(form.get('quality')),
     };
   }
@@ -221,6 +267,16 @@ export async function parseOpenAIImageRequest(request: NextRequest): Promise<Par
   const imageConfig = googleImageConfigFromExtraBody(payload.extra_body);
   const aspectRatio = normalizeAspectRatio(firstString(payload.aspect_ratio, payload.aspectRatio, imageConfig.aspect_ratio, imageConfig.aspectRatio));
   const imageSize = firstString(payload.image_size, payload.imageSize, imageConfig.image_size, imageConfig.imageSize);
+  const outputResolution = firstString(
+    payload.output_resolution,
+    payload.outputResolution,
+    payload.image_size,
+    payload.imageSize,
+    imageConfig.output_resolution,
+    imageConfig.outputResolution,
+    imageConfig.image_size,
+    imageConfig.imageSize
+  );
   const configSize = firstString(imageConfig.size);
 
   return {
@@ -231,6 +287,8 @@ export async function parseOpenAIImageRequest(request: NextRequest): Promise<Par
     imageReferences: collectPayloadImageReferences(payload),
     aspectRatio,
     imageSize,
+    outputResolution,
+    outputFormat: firstString(payload.output_format, payload.outputFormat),
     quality,
   };
 }
@@ -251,13 +309,24 @@ export async function resolveImageModelId(model?: string): Promise<string | null
   const byId = models.find((m) => m.id.toLowerCase() === normalized);
   if (byId) return byId.id;
 
+  const channelById = new Map(channels.map((channel) => [channel.id, channel]));
+  if (isZtyunjuanGeminiModelName(normalized)) {
+    const apexerExact = models.find((m) => {
+      const channel = channelById.get(m.channelId);
+      return channel?.type === 'apexerapi' && (
+        m.apiModel.toLowerCase() === normalized ||
+        m.name.toLowerCase() === normalized
+      );
+    });
+    if (apexerExact) return apexerExact.id;
+  }
+
   const byApiModel = models.find((m) => m.apiModel.toLowerCase() === normalized);
   if (byApiModel) return byApiModel.id;
 
   const byName = models.find((m) => m.name.toLowerCase() === normalized);
   if (byName) return byName.id;
 
-  const channelById = new Map(channels.map((channel) => [channel.id, channel]));
   const apexerModels = models.filter((m) => channelById.get(m.channelId)?.type === 'apexerapi');
   if (apexerModels.length > 0) {
     if ((normalized.includes('banana') || normalized.includes('香蕉')) && (normalized.includes('pro') || normalized.includes('hd'))) {

@@ -66,6 +66,10 @@ export async function POST(request: NextRequest) {
     const imageRequest: ImageGenerateRequest = {
       modelId: imageModelId,
       prompt: parsed.prompt,
+      operation: 'edit',
+      responseFormat: parsed.responseFormat,
+      outputResolution: parsed.outputResolution,
+      outputFormat: parsed.outputFormat,
       quality: parsed.quality,
       ...resolveImageSize(parsed.size),
       images: imageInputs.length > 0 ? imageInputs : undefined,
@@ -77,6 +81,9 @@ export async function POST(request: NextRequest) {
     }
     if (parsed.imageSize) {
       imageRequest.imageSize = parsed.imageSize;
+    }
+    if (!imageRequest.outputResolution && imageRequest.imageSize) {
+      imageRequest.outputResolution = imageRequest.imageSize;
     }
 
     const result = await generateImage(imageRequest);

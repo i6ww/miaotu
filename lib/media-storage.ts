@@ -62,11 +62,25 @@ async function ensureMediaDir(): Promise<void> {
 
 // Extract mime type and payload from a base64 data URL.
 function parseDataUrl(dataUrl: string): { mimeType: string; data: string } | null {
-  const match = dataUrl.match(/^data:([^;]+);base64,(.+)$/);
-  if (!match) return null;
+  const trimmed = dataUrl.trim();
+  if (!trimmed.startsWith('data:')) return null;
+
+  const commaIndex = trimmed.indexOf(',');
+  if (commaIndex <= 5) return null;
+
+  const meta = trimmed.slice(5, commaIndex).trim();
+  const data = trimmed.slice(commaIndex + 1).trim();
+  if (!meta || !data) return null;
+
+  const parts = meta.split(';').map((part) => part.trim()).filter(Boolean);
+  if (!parts.some((part) => part.toLowerCase() === 'base64')) return null;
+
+  const mimeType = parts.find((part) => part !== 'base64' && !part.includes('=')) || '';
+  if (!mimeType) return null;
+
   return {
-    mimeType: match[1],
-    data: match[2],
+    mimeType,
+    data,
   };
 }
 

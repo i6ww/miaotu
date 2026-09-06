@@ -9,7 +9,7 @@ import { toast } from '@/components/ui/toaster';
 import type { ImageChannel, ImageModel, ImageModelFeatures } from '@/types';
 
 const CHANNEL_TYPES = [
-  { value: 'apexerapi', label: 'adobe2api', description: 'adobe2api image gateway' },
+  { value: 'apexerapi', label: 'ztyunjuan', description: 'ztyunjuan image gateway' },
   { value: 'openai-compatible', label: 'OpenAI Images', description: 'OpenAI /v1/images/generations API' },
   { value: 'openai-edits', label: 'OpenAI Edits', description: 'OpenAI /v1/images/edits API' },
   { value: 'openai-chat', label: 'OpenAI Chat', description: 'OpenAI /v1/chat/completions API' },
@@ -97,6 +97,54 @@ const GEMINI_PRO_SIZE_GROUPS_PIXELS: SizeResolutionGroup[] = [
 
 // 旧版 SanHub 曾使用 ratio 后缀模型名；新版 Gemini 原生接口使用一个模型名
 // 配合 generationConfig.responseFormat.image 控制比例和分辨率。
+const OPENAI_OFFICIAL_SIZE_GROUPS_PIXELS: SizeResolutionGroup[] = [
+  {
+    size: '1K',
+    rows: [
+      { ratio: '1:1', resolution: '1024x1024' },
+      { ratio: '2:3', resolution: '1024x1536' },
+      { ratio: '3:2', resolution: '1536x1024' },
+      { ratio: '3:4', resolution: '768x1024' },
+      { ratio: '4:3', resolution: '1024x768' },
+      { ratio: '4:5', resolution: '1024x1280' },
+      { ratio: '5:4', resolution: '1280x1024' },
+      { ratio: '9:16', resolution: '720x1280' },
+      { ratio: '16:9', resolution: '1280x720' },
+      { ratio: '21:9', resolution: '1680x720' },
+    ],
+  },
+  {
+    size: '2K',
+    rows: [
+      { ratio: '1:1', resolution: '2048x2048' },
+      { ratio: '2:3', resolution: '1600x2400' },
+      { ratio: '3:2', resolution: '2400x1600' },
+      { ratio: '3:4', resolution: '1536x2048' },
+      { ratio: '4:3', resolution: '2048x1536' },
+      { ratio: '4:5', resolution: '2048x2560' },
+      { ratio: '5:4', resolution: '2560x2048' },
+      { ratio: '9:16', resolution: '1152x2048' },
+      { ratio: '16:9', resolution: '2048x1152' },
+      { ratio: '21:9', resolution: '2464x1056' },
+    ],
+  },
+  {
+    size: '4K',
+    rows: [
+      { ratio: '1:1', resolution: '2880x2880' },
+      { ratio: '2:3', resolution: '2336x3504' },
+      { ratio: '3:2', resolution: '3504x2336' },
+      { ratio: '3:4', resolution: '2448x3264' },
+      { ratio: '4:3', resolution: '3264x2448' },
+      { ratio: '4:5', resolution: '2560x3200' },
+      { ratio: '5:4', resolution: '3200x2560' },
+      { ratio: '9:16', resolution: '2160x3840' },
+      { ratio: '16:9', resolution: '3840x2160' },
+      { ratio: '21:9', resolution: '3808x1632' },
+    ],
+  },
+];
+
 const buildGeminiProModelGroups = (_baseModel: string): SizeResolutionGroup[] => {
   return cloneSizeGroups(GEMINI_PRO_SIZE_GROUPS_PIXELS);
 };
@@ -122,7 +170,7 @@ type GroupedRemoteModel = {
   features: { textToImage: boolean; imageToImage: boolean; imageSize: boolean };
 };
 
-type ModelPresetId = 'general' | 'edit' | 'hd' | 'matting' | 'upscale';
+type ModelPresetId = 'general' | 'edit' | 'hd' | 'gptOfficial' | 'matting' | 'upscale';
 
 type ModelPresetOption = {
   id: ModelPresetId;
@@ -169,10 +217,10 @@ const CHANNEL_FORM_GUIDES: Record<ImageAdminChannelType, {
     recommendedAction: '先保存渠道，再套用 GPT Image 2 预设',
   },
   apexerapi: {
-    defaultName: 'adobe2api',
-    summary: '适合接入 adobe2api，覆盖 Banana Pro、Banana 2 和 GPT Image 2。',
-    hint: '填写 adobe2api Base URL 与 API Key 后，可直接用预设或从 /v1/models 导入。',
-    recommendedAction: '先保存渠道，再导入或套用 adobe2api 预设',
+    defaultName: 'ztyunjuan',
+    summary: '适合接入 ztyunjuan，覆盖 Gemini、Banana Pro、Banana 2 和 GPT Image 2。',
+    hint: '填写 ztyunjuan Base URL 与 API Key 后，可直接用预设或从 /v1/models 导入。',
+    recommendedAction: '先保存渠道，再导入或套用 ztyunjuan 预设',
   },
   'openai-chat': {
     defaultName: 'OpenAI Chat',
@@ -211,17 +259,19 @@ const CHANNEL_FORM_GUIDES: Record<ImageAdminChannelType, {
 
 const MANUAL_PRESET_OPTIONS: Record<ImageAdminChannelType, ModelPresetOption[]> = {
   apexerapi: [
-    { id: 'general', label: 'Banana 2', description: 'adobe2api gemini_3.1_flash_image_preview。' },
-    { id: 'hd', label: 'Banana Pro', description: 'adobe2api gemini_3.0_pro_image_preview，多档分辨率。' },
-    { id: 'edit', label: 'GPT Image 2', description: 'adobe2api gpt-image-2，支持参考图。' },
+    { id: 'general', label: 'Banana 2', description: 'ztyunjuan gemini_3.1_flash_image_preview。' },
+    { id: 'hd', label: 'Banana Pro', description: 'ztyunjuan gemini_3.0_pro_image_preview，多档分辨率。' },
+    { id: 'edit', label: 'GPT Image 2', description: 'ztyunjuan gpt-image-2，支持参考图。' },
   ],
   'openai-compatible': [
     { id: 'general', label: '标准生图', description: '适合常规文生图，带默认常用比例。' },
     { id: 'edit', label: '编辑变体', description: '适合编辑、局部重绘或 variation 场景。' },
     { id: 'hd', label: '高清多档', description: '适合需要 1K / 2K / 4K 多档分辨率的模型。' },
+    { id: 'gptOfficial', label: 'gpt官方参数', description: 'OpenAI Images 官方参数预设，适配标准图像生成。' },
   ],
   'openai-edits': [
     { id: 'edit', label: 'GPT Image 2', description: 'OpenAI /v1/images/edits，默认要求参考图。' },
+    { id: 'gptOfficial', label: 'gpt官方参数', description: 'OpenAI Edits 官方参数预设，适配标准参考图编辑。' },
   ],
   'openai-chat': [
     { id: 'general', label: '标准生图', description: '适合兼容聊天接口的图像生成模型。' },
@@ -395,6 +445,26 @@ function buildModelPreset(channelType: ImageAdminChannelType, presetId: ModelPre
     };
     form.defaultImageSize = '1K';
     sizeGroups = cloneSizeGroups(GEMINI_PRO_SIZE_GROUPS_PIXELS);
+  }
+
+  if (presetId === 'gptOfficial') {
+    form.name = 'gpt官方参数';
+    form.description = channelType === 'openai-edits'
+      ? 'OpenAI Edits 官方参数预设，适合参考图编辑。'
+      : 'OpenAI Images 官方参数预设，适合标准图像生成。';
+    form.apiModel = 'gpt-image-medium';
+    form.features = {
+      textToImage: true,
+      imageToImage: channelType === 'openai-edits',
+      upscale: false,
+      matting: false,
+      multipleImages: channelType === 'openai-edits',
+      imageSize: true,
+      qualityOptions: channelType === 'openai-edits' ? ['low', 'medium', 'high'] : undefined,
+    };
+    form.defaultImageSize = '1K';
+    form.requiresReferenceImage = channelType === 'openai-edits';
+    sizeGroups = cloneSizeGroups(OPENAI_OFFICIAL_SIZE_GROUPS_PIXELS);
   }
 
   if (presetId === 'matting') {
