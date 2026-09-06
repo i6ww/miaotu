@@ -68,15 +68,34 @@ async function backfillGenerationClientRequestIds(db: DatabaseAdapter): Promise<
     );
 
     let updated = 0;
+    let skipped = 0;
     for (const row of rows as any[]) {
       const clientRequestId = extractClientRequestIdFromParams(row.params);
       if (!clientRequestId) continue;
 
-      const [result] = await db.execute(
-        'UPDATE generations SET client_request_id = ? WHERE id = ? AND (client_request_id IS NULL OR client_request_id = ?)',
-        [clientRequestId, row.id, '']
-      );
-      if (getAffectedRows(result) > 0) updated += 1;
+      try {
+        const [result] = await db.execute(
+          'UPDATE generations SET client_request_id = ? WHERE id = ? AND (client_request_id IS NULL OR client_request_id = ?)',
+          [clientRequestId, row.id, '']
+        );
+        if (getAffectedRows(result) > 0) updated += 1;
+      } catch (error) {
+        const e = error as { code?: string; errno?: number };
+        const isDuplicate =
+          e?.code === 'ER_DUP_ENTRY' || e?.errno === 1062;
+        if (!isDuplicate) throw error;
+        // Duplicate (user_id, client_request_id): another legacy row already
+        // claims this request id. Leave this row untouched and keep going so a
+        // single conflict never aborts the whole backfill on every boot.
+        skipped += 1;
+      }
+    }
+
+    if (updated > 0) {
+      console.log(`[DB] Backfilled generation client_request_id values: ${updated}`);
+    }
+    if (skipped > 0) {
+      console.log(`[DB] Skipped ${skipped} legacy generation row(s) whose client_request_id is already claimed`);
     }
 
     if (updated > 0) {
