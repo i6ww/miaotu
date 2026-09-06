@@ -162,7 +162,7 @@ export function DashboardBackground({ reducedEffects = false }: DashboardBackgro
 
           {/* Glow B */}
           <div 
-            className="absolute w-[350px] h-[350px] rounded-full opacity-12 blur-[70px] animate-blob"
+            className="absolute w-[350px] h-[350px] rounded-full opacity-[0.12] blur-[70px] animate-blob"
             style={{
               ...blobStyle,
               background: 'radial-gradient(circle, hsl(var(--glow-b) / 0.35) 0%, transparent 70%)',
