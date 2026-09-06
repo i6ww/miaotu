@@ -4,10 +4,20 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { History, Trash2, Search, Loader2, Eye } from 'lucide-react';
 import { formatDate, cn } from '@/lib/utils';
 import { IMAGE_MODELS } from '@/lib/model-config';
+import { inferImageSizeLabel, aspectRatioOfSize } from '@/lib/image-sizing';
 import { toast } from '@/components/ui/toaster';
 import { PaginationControls } from '@/components/admin/pagination';
 
 const GENERATIONS_PAGE_SIZE = 50;
+
+interface GenerationParams {
+  model?: string;
+  modelId?: string;
+  aspectRatio?: string;
+  imageSize?: string;
+  size?: string;
+  quality?: string;
+}
 
 interface GenerationRecord {
   id: string;
@@ -15,7 +25,7 @@ interface GenerationRecord {
   userEmail: string;
   userName: string;
   type: string;
-  params?: { model?: string };
+  params?: GenerationParams;
   prompt: string;
   resultUrl: string;
   cost: number;
@@ -53,19 +63,40 @@ const TYPE_LABELS: Record<string, string> = {
   'gitee-image': 'Gitee 图像',
 };
 
-function getRecordTypeLabel(record: GenerationRecord): string {
+// Build the human readable "tier ratio" suffix from recorded params, e.g. "1K 16:9".
+// imageSize already holds the normalized tier (1K/2K/4K); for legacy records without it
+// we fall back to inferring both tier and ratio from the raw pixel size.
+function getResolutionDetail(params?: GenerationParams): string | undefined {
+  if (!params) return undefined;
+  const parts: string[] = [];
+  const tier = params.imageSize || inferImageSizeLabel(params.size);
+  const ratio = params.aspectRatio || (params.size ? aspectRatioOfSize(params.size) : undefined);
+  if (tier) parts.push(tier);
+  if (ratio) parts.push(ratio);
+  if (parts.length === 0 && params.size) parts.push(params.size);
+  return parts.length > 0 ? parts.join(' ') : undefined;
+}
+
+function getRecordTypeInfo(record: GenerationRecord): { label: string; detail?: string } {
   if (
     record.type === 'gemini-image' ||
     record.type === 'zimage-image' ||
     record.type === 'gitee-image'
   ) {
-    const modelLabel = record.params?.model
-      ? IMAGE_MODEL_LABELS.get(record.params.model)
+    const params = record.params;
+    // Prefer the display name from the static model registry; when a channel-custom
+    // model is unknown there (e.g. gpt-image-medium) show its real API model name
+    // instead of degrading to the coarse channel type label.
+    const modelLabel = params?.model
+      ? IMAGE_MODEL_LABELS.get(params.model) || params.model
       : undefined;
-    if (modelLabel) return modelLabel;
+    if (modelLabel) {
+      const detail = getResolutionDetail(params);
+      return detail ? { label: modelLabel, detail } : { label: modelLabel };
+    }
   }
 
-  return TYPE_LABELS[record.type] || record.type;
+  return { label: TYPE_LABELS[record.type] || record.type };
 }
 
 export default function GenerationsPage() {
@@ -215,7 +246,9 @@ export default function GenerationsPage() {
               </tr>
             </thead>
             <tbody>
-              {records.map((record) => (
+              {records.map((record) => {
+                const typeInfo = getRecordTypeInfo(record);
+                return (
                 <tr key={record.id} className="border-b border-border/70 hover:bg-card/60">
                   <td className="px-5 py-4">
                     <div>
@@ -224,8 +257,11 @@ export default function GenerationsPage() {
                     </div>
                   </td>
                   <td className="px-5 py-4">
-                    <span className="px-2 py-1 text-xs rounded-full bg-card/70 text-foreground/70">
-                      {getRecordTypeLabel(record)}
+                    <span className="px-2 py-1 text-xs rounded-full bg-card/70 text-foreground/70 whitespace-nowrap">
+                      {typeInfo.label}
+                      {typeInfo.detail && (
+                        <span className="text-foreground/40 ml-1.5">{typeInfo.detail}</span>
+                      )}
                     </span>
                   </td>
                   <td className="px-5 py-4 max-w-xs">
@@ -261,7 +297,8 @@ export default function GenerationsPage() {
                     </div>
                   </td>
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
         </div>
