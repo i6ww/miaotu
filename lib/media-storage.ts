@@ -24,6 +24,7 @@ const MAX_REMOTE_MEDIA_BYTES = Math.max(
 const USE_FILE_STORAGE = process.env.MEDIA_FILE_STORAGE !== 'false';
 
 type SaveMediaOptions = {
+  /** Kept for existing callers; image URLs now come from the bucket's own publicBaseUrl. */
   publicBaseUrl?: string;
   filename?: string;
 };
@@ -307,7 +308,7 @@ export async function saveMediaWithMetrics(
         remote.buffer,
         remote.mimeType,
         filename,
-        { publicBaseUrl: options.publicBaseUrl }
+        { preferDirectS3Url: true, requirePublicBaseUrl: true }
       );
       metrics.mediaUploadDurationMs += elapsedMs(uploadStartedAt);
       if (uploadedUrl) {
@@ -339,7 +340,10 @@ export async function saveMediaWithMetrics(
       const parsed = parseDataUrl(dataUrl);
       const filename = options.filename || `${id}.${getExtension(parsed?.mimeType || 'image/jpeg')}`;
       const uploadStartedAt = Date.now();
-      const picuiUrl = await uploadToPicUI(dataUrl, filename, { publicBaseUrl: options.publicBaseUrl });
+      const picuiUrl = await uploadToPicUI(dataUrl, filename, {
+        preferDirectS3Url: true,
+        requirePublicBaseUrl: true,
+      });
       metrics.mediaUploadDurationMs += elapsedMs(uploadStartedAt);
       if (picuiUrl) {
         console.log(`[MediaStorage] Uploaded to remote bucket: ${picuiUrl}`);
