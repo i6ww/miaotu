@@ -1,7 +1,7 @@
 import type { InviteBatchResult, InviteCode, RedemptionBatchSummary, RedemptionCode, StatsOverview, DailyStats, PaymentStatsSummary, PaymentOrderStatus } from '@/types';
 import { generateId } from './utils';
 import { createDatabaseAdapter, type DatabaseAdapter } from './db-adapter';
-import { getPaymentOrdersForAdmin, getSystemConfig } from './db';
+import { getPaymentOrdersForAdmin, getSystemConfig, createRedemptionPaymentOrder } from './db';
 
 // ========================================
 // Database adapter
@@ -99,6 +99,74 @@ export async function initializeCodesTables(): Promise<void> {
   }
 
   tablesInitialized = true;
+
+  await backfillRedemptionPaymentOrders(db);
+}
+
+// One-time (idempotent) backfill: legacy redemptions happened before payment
+// orders were recorded, so mirror them into payment_orders so the admin
+// payment records (充值记录) shows historical code usage too.
+async function backfillRedemptionPaymentOrders(db: DatabaseAdapter): Promise<void> {
+  try {
+    const [rows] = await db.execute(
+      `SELECT rc.id, rc.code, rc.points, rc.used_by, rc.used_at
+       FROM redemption_codes rc
+       WHERE rc.used_by IS NOT NULL
+         AND NOT EXISTS (
+           SELECT 1 FROM payment_orders po
+           WHERE po.provider = 'redemption' AND po.provider_trade_no = rc.code
+         )`
+    );
+
+    for (const row of rows as any[]) {
+      const paidAt = Number(row.used_at) || Date.now();
+      const order = {
+        id: generateId(),
+        userId: String(row.used_by),
+        outTradeNo: `REDEEM${paidAt}${Math.random().toString(36).slice(2, 8).toUpperCase()}`,
+        provider: 'redemption',
+        providerTradeNo: String(row.code),
+        paymentType: 'redemption_code',
+        amountCents: 0,
+        paidAmountCents: 0,
+        points: Math.floor(Number(row.points) || 0),
+        status: 'succeeded',
+        rawNotify: JSON.stringify({
+          type: 'redemption_code',
+          code: String(row.code),
+          codeId: String(row.id),
+        }),
+        createdAt: paidAt,
+        paidAt,
+        updatedAt: paidAt,
+      };
+      if (order.points <= 0) continue;
+
+      await db.execute(
+        `INSERT INTO payment_orders (id, user_id, out_trade_no, provider, provider_trade_no, payment_type, amount_cents, paid_amount_cents, points, status, raw_notify, created_at, paid_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          order.id,
+          order.userId,
+          order.outTradeNo,
+          order.provider,
+          order.providerTradeNo,
+          order.paymentType,
+          order.amountCents,
+          order.paidAmountCents,
+          order.points,
+          order.status,
+          order.rawNotify,
+          order.createdAt,
+          order.paidAt,
+          order.updatedAt,
+        ]
+      );
+    }
+  } catch {
+    // payment_orders table may not exist yet on a fresh database; retry on
+    // the next boot. Real failures surface through the redeem flow itself.
+  }
 }
 
 // ========================================
@@ -536,6 +604,21 @@ export async function redeemCode(code: string, userId: string): Promise<{ succes
     'UPDATE users SET balance = balance + ?, updated_at = ? WHERE id = ?',
     [redemption.points, now, userId]
   );
+
+  // Record the redemption as a payment order so it shows up in the admin
+  // payment records (充值记录) with the code that was used. Best-effort:
+  // the balance was already credited, so never fail the redemption here.
+  try {
+    await createRedemptionPaymentOrder({
+      userId,
+      points: redemption.points,
+      code: redemption.code,
+      codeId: redemption.id,
+      paidAt: now,
+    });
+  } catch (error) {
+    console.warn('[DB] Failed to record redemption payment order:', error);
+  }
 
   return { success: true, points: redemption.points };
 }

@@ -1300,6 +1300,66 @@ export async function createManualBalancePaymentOrder(input: {
   return order;
 }
 
+export async function createRedemptionPaymentOrder(input: {
+  userId: string;
+  points: number;
+  code: string;
+  codeId: string;
+  paidAt?: number;
+}): Promise<PaymentOrder> {
+  await initializeDatabase();
+  const db = getAdapter();
+  const now = Date.now();
+  const safePoints = Math.floor(Number(input.points));
+  if (!input.userId || !input.code || !Number.isFinite(safePoints) || safePoints <= 0) {
+    throw new Error('Invalid redemption payment order');
+  }
+
+  const order: PaymentOrder = {
+    id: generateId(),
+    userId: input.userId,
+    outTradeNo: `REDEEM${now}${Math.random().toString(36).slice(2, 8).toUpperCase()}`,
+    provider: 'redemption',
+    providerTradeNo: input.code,
+    paymentType: 'redemption_code',
+    amountCents: 0,
+    paidAmountCents: 0,
+    points: safePoints,
+    status: 'succeeded',
+    rawNotify: JSON.stringify({
+      type: 'redemption_code',
+      code: input.code,
+      codeId: input.codeId,
+    }),
+    createdAt: now,
+    paidAt: input.paidAt ?? now,
+    updatedAt: now,
+  };
+
+  await db.execute(
+    `INSERT INTO payment_orders (id, user_id, out_trade_no, provider, provider_trade_no, payment_type, amount_cents, paid_amount_cents, points, status, raw_notify, created_at, paid_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      order.id,
+      order.userId,
+      order.outTradeNo,
+      order.provider,
+      order.providerTradeNo,
+      order.paymentType,
+      order.amountCents,
+      order.paidAmountCents,
+      order.points,
+      order.status,
+      order.rawNotify,
+      order.createdAt,
+      order.paidAt,
+      order.updatedAt,
+    ]
+  );
+
+  return order;
+}
+
 export async function getPaymentOrderByOutTradeNo(
   outTradeNo: string
 ): Promise<PaymentOrder | null> {

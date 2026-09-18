@@ -47,9 +47,12 @@ function paymentStatusLabel(status: string): string {
   return '\u5f85\u652f\u4ed8';
 }
 
-function paymentSourceLabel(order: { provider: string; paymentType: string }): string {
+function paymentSourceLabel(order: { provider: string; paymentType: string; providerTradeNo?: string }): string {
   if (order.provider === 'manual' || order.paymentType === 'admin_balance') {
     return '\u7ba1\u7406\u5458\u52a0\u5206';
+  }
+  if (order.provider === 'redemption' || order.paymentType === 'redemption_code') {
+    return order.providerTradeNo ? `\u5151\u6362\u7801 ${order.providerTradeNo}` : '\u5151\u6362\u7801';
   }
   return order.paymentType || '-';
 }
@@ -431,7 +434,7 @@ export default function StatsPage() {
                       <div className="mt-1 text-[10px] text-foreground/35">{paymentSourceLabel(order)}</div>
                     </td>
                     <td className="px-5 py-3 text-right text-foreground">
-                      {order.provider === 'manual' ? '-' : formatCurrency(order.paidAmountCents)}
+                      {order.provider === 'manual' || order.provider === 'redemption' ? '-' : formatCurrency(order.paidAmountCents)}
                     </td>
                     <td className="px-5 py-3 text-right text-emerald-300">+{formatBalance(order.points)}</td>
                     <td className={`px-5 py-3 text-right ${paymentStatusClass(order.status)}`}>
