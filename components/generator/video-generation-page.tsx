@@ -284,29 +284,31 @@ export function VideoGenerationView({
 
   const modelsCacheRef = useRef<SafeVideoModel[] | null>(null);
 
-  // 加载模型列表
+  // Reload models on tab activation, browser tab focus and a low-frequency
+  // poll so admin channel/model toggles reach open user pages quickly.
   useEffect(() => {
     if (!isActive || modelsLoaded) {
       return;
     }
 
-    const loadModels = async () => {
-      if (modelsCacheRef.current) {
+    const refreshModels = async (isInitial: boolean) => {
+      if (isInitial && modelsCacheRef.current) {
         setAvailableModels(modelsCacheRef.current);
         setModelsLoaded(true);
         return;
       }
       try {
-        const res = await fetch('/api/video-models');
+        const res = await fetch('/api/video-models', { cache: 'no-store' });
         if (res.ok) {
           const data = await res.json();
           const models = data.data?.models || [];
           modelsCacheRef.current = models;
           setAvailableModels(models);
-          // 设置默认选中第一个模型
+
           if (models.length > 0) {
             setSelectedModelId((prev) => {
-              if (prev) return prev;
+              if (prev && models.some((model: SafeVideoModel) => model.id === prev)) return prev;
+              // fall back to the first model when the current one was disabled
               setAspectRatio(models[0].defaultAspectRatio);
               setDuration(models[0].defaultDuration);
               return models[0].id;
@@ -314,12 +316,30 @@ export function VideoGenerationView({
           }
         }
       } catch (err) {
-        console.error('Failed to load models:', err);
+        // keep the stale list on refresh failures; only log on initial load
+        if (isInitial) console.error('Failed to load models:', err);
       } finally {
-        setModelsLoaded(true);
+        if (isInitial) setModelsLoaded(true);
       }
     };
-    void loadModels();
+
+    void refreshModels(true);
+
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        void refreshModels(false);
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
+
+    const timer = setInterval(() => {
+      if (!document.hidden) void refreshModels(false);
+    }, 60000);
+
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibility);
+      clearInterval(timer);
+    };
   }, [isActive, modelsLoaded]);
 
   // 加载每日使用量

@@ -237,10 +237,12 @@ export function ChatPage() {
     window.localStorage.setItem(ACTIVE_CHAT_SESSION_STORAGE_KEY, activeSessionId);
   }, [activeSessionId, hasMounted, sessions]);
 
+  // Reload models on browser tab focus and a low-frequency poll so admin
+  // channel/model toggles reach open user pages quickly.
   useEffect(() => {
-    const loadModels = async () => {
+    const refreshModels = async (isInitial: boolean) => {
       try {
-        setModelsLoading(true);
+        if (isInitial) setModelsLoading(true);
         const response = await fetch('/api/chat/models', { cache: 'no-store' });
         const payload = await response.json();
         if (!response.ok || !payload.success) {
@@ -249,19 +251,42 @@ export function ChatPage() {
 
         const enabledModels = (payload.data || []).filter((model: ChatModelOption) => model.enabled);
         setModels(enabledModels);
-        setSelectedModelId((current) => current || activeSession?.modelId || enabledModels[0]?.id || '');
-      } catch (error) {
-        toast({
-          title: TEXT.loadFailed,
-          description: error instanceof Error ? error.message : TEXT.loadFailed,
-          variant: 'destructive',
+        setSelectedModelId((current) => {
+          if (current && enabledModels.some((model: ChatModelOption) => model.id === current)) return current;
+          // fall back to the first model when the current one was disabled
+          return enabledModels[0]?.id || '';
         });
+      } catch (error) {
+        // only surface errors on the initial load; keep the stale list on refresh failures
+        if (isInitial) {
+          toast({
+            title: TEXT.loadFailed,
+            description: error instanceof Error ? error.message : TEXT.loadFailed,
+            variant: 'destructive',
+          });
+        }
       } finally {
-        setModelsLoading(false);
+        if (isInitial) setModelsLoading(false);
       }
     };
 
-    void loadModels();
+    void refreshModels(true);
+
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        void refreshModels(false);
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
+
+    const timer = setInterval(() => {
+      if (!document.hidden) void refreshModels(false);
+    }, 60000);
+
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibility);
+      clearInterval(timer);
+    };
   }, [activeSession?.modelId]);
 
   useEffect(() => {

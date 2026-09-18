@@ -168,19 +168,21 @@ export function ImageGenerationPage({
 
   const modelsCacheRef = useRef<SafeImageModel[] | null>(null);
 
+  // Reload models on tab activation, browser tab focus and a low-frequency
+  // poll so admin channel/model toggles reach open user pages quickly.
   useEffect(() => {
-    if (!isActive || modelsLoaded) {
+    if (!isActive) {
       return;
     }
 
-    const loadModels = async () => {
-      if (modelsCacheRef.current) {
+    const refreshModels = async (isInitial: boolean) => {
+      if (isInitial && modelsCacheRef.current) {
         setAvailableModels(modelsCacheRef.current);
         setModelsLoaded(true);
         return;
       }
       try {
-        const res = await fetch('/api/image-models');
+        const res = await fetch('/api/image-models', { cache: 'no-store' });
         if (!res.ok) return;
 
         const data = await res.json();
@@ -190,7 +192,8 @@ export function ImageGenerationPage({
 
         if (models.length > 0) {
           setSelectedModelId((prev) => {
-            if (prev) return prev;
+            if (prev && models.some((model: SafeImageModel) => model.id === prev)) return prev;
+            // fall back to the first model when the current one was disabled
             setAspectRatio(models[0].defaultAspectRatio);
             if (models[0].defaultImageSize) {
               setImageSize(models[0].defaultImageSize);
@@ -199,13 +202,32 @@ export function ImageGenerationPage({
           });
         }
       } catch (err) {
-        console.error('Failed to load models:', err);
+        // keep the stale list on refresh failures; only log on initial load
+        if (isInitial) console.error('Failed to load models:', err);
       } finally {
-        setModelsLoaded(true);
+        if (isInitial) setModelsLoaded(true);
       }
     };
 
-    void loadModels();
+    if (!modelsLoaded) {
+      void refreshModels(true);
+    }
+
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        void refreshModels(false);
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
+
+    const timer = setInterval(() => {
+      if (!document.hidden) void refreshModels(false);
+    }, 60000);
+
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibility);
+      clearInterval(timer);
+    };
   }, [isActive, modelsLoaded]);
 
   useEffect(() => {
