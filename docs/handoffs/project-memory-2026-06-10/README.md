@@ -13,7 +13,7 @@ f:\sanhub
 Production server:
 
 ```text
-43.165.176.179
+<SERVER_IP>
 ```
 
 Production project path:
@@ -70,7 +70,7 @@ sanhub_sanhub_mysql
 Public app URL:
 
 ```text
-http://43.165.176.179:3000
+http://<SERVER_IP>:3000
 ```
 
 The latest deployment was tested by the user and reported as working.
@@ -242,7 +242,7 @@ scripts/test_grok2api_video.py
 External test endpoint used during investigation:
 
 ```text
-https://43.165.176.179:8000
+https://<SERVER_IP>:8000
 ```
 
 API key used during testing:

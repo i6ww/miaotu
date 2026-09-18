@@ -21,7 +21,7 @@ https://github.com/i6ww/sanhub.git
 生产服务器当前 IP：
 
 ```text
-43.165.176.179
+<SERVER_IP>
 ```
 
 生产项目路径约定：
@@ -90,7 +90,7 @@ M lib/db.ts
 
 ```env
 APP_PORT=3001
-NEXTAUTH_URL=http://43.165.176.179:3001
+NEXTAUTH_URL=http://<SERVER_IP>:3001
 MYSQL_POOL_SIZE=50
 TRUST_PROXY=true
 MEDIA_FILE_STORAGE=true
@@ -142,7 +142,7 @@ V1_API_KEY=$(openssl rand -hex 24)
 
 cat > .env <<EOF
 APP_PORT=3001
-NEXTAUTH_URL=http://43.165.176.179:3001
+NEXTAUTH_URL=http://<SERVER_IP>:3001
 NEXTAUTH_SECRET=$NEXTAUTH_SECRET
 
 ADMIN_EMAIL=admin@example.com
@@ -171,7 +171,7 @@ docker compose logs -f sanhub
 访问：
 
 ```text
-http://43.165.176.179:3001
+http://<SERVER_IP>:3001
 ```
 
 后续修改 `.env`：
@@ -546,7 +546,7 @@ No 'Access-Control-Allow-Origin' header is present
 用户生图上传参考图时报错：
 
 ```text
-POST https://43.165.176.179/api/generate/image 413 Content Too Large
+POST https://<SERVER_IP>/api/generate/image 413 Content Too Large
 ```
 
 结论：
