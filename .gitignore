@@ -54,6 +54,7 @@ AGENTS.md
 logs/
 *.log
 *.py
+__pycache__/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*

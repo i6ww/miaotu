@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth';
-import { getAllGenerations, adminDeleteGeneration } from '@/lib/db-codes';
+import { getAllGenerations, getGenerationFailureSummary, getAvailableChannelTypes, adminDeleteGeneration } from '@/lib/db-codes';
 
 export async function GET(request: Request) {
   try {
@@ -17,10 +17,41 @@ export async function GET(request: Request) {
 
     const userId = searchParams.get('userId') || undefined;
     const type = searchParams.get('type') || undefined;
+    const channelType = searchParams.get('channelType') || undefined;
     const status = searchParams.get('status') || undefined;
     const search = searchParams.get('q')?.trim() || undefined;
+    // Number(null) === 0, so guard explicitly against missing params to avoid
+    // accidentally filtering on timestamp 0 (which would hide all records for endTime).
+    const startTimeParam = searchParams.get('startTime');
+    const endTimeParam = searchParams.get('endTime');
+    const startTime =
+      startTimeParam !== null && startTimeParam !== '' && Number.isFinite(Number(startTimeParam))
+        ? Number(startTimeParam)
+        : undefined;
+    const endTime =
+      endTimeParam !== null && endTimeParam !== '' && Number.isFinite(Number(endTimeParam))
+        ? Number(endTimeParam)
+        : undefined;
 
-    const { generations, total } = await getAllGenerations({ limit, offset, userId, type, status, search });
+    const { generations, total } = await getAllGenerations({
+      limit,
+      offset,
+      userId,
+      type,
+      status,
+      search,
+      startTime,
+      endTime,
+      channelType,
+    });
+
+    // Failure summary only makes sense when the list isn't filtered to non-failed statuses.
+    const failureSummary =
+      !status || status === 'failed'
+        ? await getGenerationFailureSummary({ userId, type, search, startTime, endTime, channelType })
+        : undefined;
+
+    const availableChannelTypes = await getAvailableChannelTypes();
 
     return NextResponse.json({
       success: true,
@@ -28,6 +59,8 @@ export async function GET(request: Request) {
       total,
       page,
       hasMore: offset + generations.length < total,
+      failureSummary,
+      availableChannelTypes,
     });
   } catch (error) {
     console.error('Get generations error:', error);

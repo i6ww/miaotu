@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { History, Trash2, Search, Loader2, Eye } from 'lucide-react';
+import { History, Trash2, Search, Loader2, Eye, X } from 'lucide-react';
 import { formatDate, cn } from '@/lib/utils';
 import { IMAGE_MODELS } from '@/lib/model-config';
 import { inferImageSizeLabel, aspectRatioOfSize } from '@/lib/image-sizing';
@@ -30,17 +30,79 @@ interface GenerationRecord {
   resultUrl: string;
   cost: number;
   status: string;
+  errorMessage?: string | null;
+  channelId?: string;
+  channelName?: string;
+  balancePrecharged?: boolean;
+  balanceRefunded?: boolean;
   createdAt: number;
+  updatedAt?: number;
 }
 
-const TYPE_OPTIONS = [
-  { value: '', label: '全部类型' },
-  { value: 'sora-video', label: '视频' },
-  { value: 'sora-image', label: 'Sora 图像' },
-  { value: 'gemini-image', label: 'Gemini 图像' },
-  { value: 'zimage-image', label: 'Z-Image 图像' },
-  { value: 'gitee-image', label: 'Gitee 图像' },
+interface UserFilter {
+  userId: string;
+  label: string;
+}
+
+interface FailureCategory {
+  key: string;
+  label: string;
+  count: number;
+  topMessages: string[];
+}
+
+interface FailureSummary {
+  total: number;
+  categories: FailureCategory[];
+}
+
+const TIME_OPTIONS = [
+  { value: 'all', label: '全部时间' },
+  { value: 'today', label: '今天' },
+  { value: '7d', label: '近 7 天' },
+  { value: '30d', label: '近 30 天' },
+  { value: 'custom', label: '自定义' },
 ];
+
+// Format generation duration (updatedAt - createdAt) into a compact human label.
+function formatDuration(record: GenerationRecord): string | undefined {
+  if (!record.updatedAt || !record.createdAt) return undefined;
+  const seconds = Math.max(0, Math.round((record.updatedAt - record.createdAt) / 1000));
+  if (record.status === 'pending' || record.status === 'processing') return undefined;
+  if (seconds < 1) return '<1s';
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+  if (minutes < 60) return rest > 0 ? `${minutes}m${rest}s` : `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h${minutes % 60}m`;
+}
+
+// A failed, precharged generation that was never refunded means the user's
+// points were silently taken — the most important thing for an admin to spot.
+function needsRefundAttention(record: GenerationRecord): boolean {
+  return (
+    record.status === 'failed' &&
+    record.cost > 0 &&
+    Boolean(record.balancePrecharged) &&
+    !record.balanceRefunded
+  );
+}
+
+// Human-friendly labels for known channel types; unknown types fall back to
+// their raw value so new channel types work with zero code changes.
+const CHANNEL_TYPE_LABELS: Record<string, string> = {
+  sora: 'Sora',
+  'openai-compatible': 'OpenAI 兼容',
+  apexerapi: 'ApexerAPI',
+  flow2api: 'Flow2API',
+  ztyunjuan: 'ZTYunjuan',
+  gitee: 'Gitee',
+};
+
+function channelTypeLabel(type: string): string {
+  return CHANNEL_TYPE_LABELS[type] || type;
+}
 
 const STATUS_OPTIONS = [
   { value: '', label: '全部状态' },
@@ -106,10 +168,33 @@ export default function GenerationsPage() {
   const [page, setPage] = useState(1);
   const [total, setTotal] = useState(0);
   const [search, setSearch] = useState('');
-  const [typeFilter, setTypeFilter] = useState('');
+  const [channelTypeFilter, setChannelTypeFilter] = useState('');
+  const [availableChannelTypes, setAvailableChannelTypes] = useState<string[]>([]);
   const [statusFilter, setStatusFilter] = useState('');
+  const [timeFilter, setTimeFilter] = useState('all');
+  const [customStart, setCustomStart] = useState('');
+  const [customEnd, setCustomEnd] = useState('');
+  const [userFilter, setUserFilter] = useState<UserFilter | null>(null);
+  const [failureSummary, setFailureSummary] = useState<FailureSummary | null>(null);
   const hasLoadedRecordsRef = useRef(false);
   const latestRecordsRequestRef = useRef(0);
+
+  // Resolve the selected time filter into concrete timestamp bounds (ms).
+  const getTimeRange = useCallback((): { start?: number; end?: number } => {
+    if (timeFilter === 'today') {
+      const d = new Date();
+      d.setHours(0, 0, 0, 0);
+      return { start: d.getTime() };
+    }
+    if (timeFilter === '7d') return { start: Date.now() - 7 * 24 * 3600 * 1000 };
+    if (timeFilter === '30d') return { start: Date.now() - 30 * 24 * 3600 * 1000 };
+    if (timeFilter === 'custom') {
+      const start = customStart ? new Date(`${customStart}T00:00:00`).getTime() : undefined;
+      const end = customEnd ? new Date(`${customEnd}T23:59:59.999`).getTime() : undefined;
+      return { start: Number.isFinite(start) ? start : undefined, end: Number.isFinite(end) ? end : undefined };
+    }
+    return {};
+  }, [timeFilter, customStart, customEnd]);
 
   const loadRecords = useCallback(async (nextPage = 1, reset = false) => {
     const requestId = latestRecordsRequestRef.current + 1;
@@ -126,9 +211,13 @@ export default function GenerationsPage() {
       const params = new URLSearchParams();
       params.set('page', String(nextPage));
       params.set('limit', String(GENERATIONS_PAGE_SIZE));
-      if (typeFilter) params.set('type', typeFilter);
+      if (channelTypeFilter) params.set('channelType', channelTypeFilter);
       if (statusFilter) params.set('status', statusFilter);
       if (search.trim()) params.set('q', search.trim());
+      if (userFilter) params.set('userId', userFilter.userId);
+      const { start, end } = getTimeRange();
+      if (start !== undefined) params.set('startTime', String(start));
+      if (end !== undefined) params.set('endTime', String(end));
 
       const res = await fetch(`/api/admin/generations?${params.toString()}`);
       if (res.ok) {
@@ -140,6 +229,10 @@ export default function GenerationsPage() {
         setRecords(data.data || []);
         setPage(data.page || nextPage);
         setTotal(data.total || 0);
+        setFailureSummary(data.failureSummary || null);
+        if (Array.isArray(data.availableChannelTypes)) {
+          setAvailableChannelTypes(data.availableChannelTypes);
+        }
         hasLoadedRecordsRef.current = true;
       } else {
         const data = await res.json().catch(() => ({}));
@@ -153,7 +246,7 @@ export default function GenerationsPage() {
         setFetching(false);
       }
     }
-  }, [search, statusFilter, typeFilter]);
+  }, [search, statusFilter, channelTypeFilter, userFilter, getTimeRange]);
 
   useEffect(() => {
     const handle = setTimeout(() => {
@@ -211,12 +304,13 @@ export default function GenerationsPage() {
           />
         </div>
         <select
-          value={typeFilter}
-          onChange={(e) => setTypeFilter(e.target.value)}
+          value={channelTypeFilter}
+          onChange={(e) => setChannelTypeFilter(e.target.value)}
           className="px-4 py-3 bg-card/60 border border-border/70 rounded-xl text-foreground focus:outline-none focus:border-border/70"
         >
-          {TYPE_OPTIONS.map(opt => (
-            <option key={opt.value} value={opt.value}>{opt.label}</option>
+          <option value="">全部渠道类型</option>
+          {availableChannelTypes.map(type => (
+            <option key={type} value={type}>{channelTypeLabel(type)}</option>
           ))}
         </select>
         <select
@@ -228,12 +322,81 @@ export default function GenerationsPage() {
             <option key={opt.value} value={opt.value}>{opt.label}</option>
           ))}
         </select>
+        <select
+          value={timeFilter}
+          onChange={(e) => setTimeFilter(e.target.value)}
+          className="px-4 py-3 bg-card/60 border border-border/70 rounded-xl text-foreground focus:outline-none focus:border-border/70"
+        >
+          {TIME_OPTIONS.map(opt => (
+            <option key={opt.value} value={opt.value}>{opt.label}</option>
+          ))}
+        </select>
+        {timeFilter === 'custom' && (
+          <div className="flex items-center gap-2">
+            <input
+              type="date"
+              value={customStart}
+              max={customEnd || undefined}
+              onChange={(e) => setCustomStart(e.target.value)}
+              className="px-3 py-3 bg-card/60 border border-border/70 rounded-xl text-foreground text-sm focus:outline-none focus:border-border/70"
+            />
+            <span className="text-foreground/40 text-sm">至</span>
+            <input
+              type="date"
+              value={customEnd}
+              min={customStart || undefined}
+              onChange={(e) => setCustomEnd(e.target.value)}
+              className="px-3 py-3 bg-card/60 border border-border/70 rounded-xl text-foreground text-sm focus:outline-none focus:border-border/70"
+            />
+          </div>
+        )}
+        {userFilter && (
+          <div className="flex items-center gap-2 px-4 py-3 bg-primary/10 border border-primary/30 rounded-xl">
+            <span className="text-sm text-primary truncate max-w-[200px]" title={userFilter.label}>
+              {userFilter.label}
+            </span>
+            <button
+              onClick={() => setUserFilter(null)}
+              className="p-1 text-primary/60 hover:text-primary hover:bg-primary/10 rounded transition-all"
+              title="取消用户筛选"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
       </div>
+
+      {/* Failure summary */}
+      {failureSummary && failureSummary.total > 0 && (!statusFilter || statusFilter === 'failed') && (
+        <div className="bg-red-500/5 border border-red-500/20 rounded-2xl px-5 py-4">
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+            <p className="text-sm font-medium text-red-400">失败原因分布</p>
+            <p className="text-xs text-foreground/40">
+              当前筛选范围内共 {failureSummary.total} 条失败 · 悬停查看典型错误信息
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2 mt-3">
+            {failureSummary.categories.map((cat) => (
+              <div
+                key={cat.key}
+                title={cat.topMessages.join('\n---\n') || undefined}
+                className="px-3 py-1.5 rounded-full bg-red-500/10 border border-red-500/20 text-xs text-red-400 whitespace-nowrap"
+              >
+                {cat.label}
+                <span className="ml-1.5 font-medium">{cat.count}</span>
+                <span className="ml-1 text-foreground/35">
+                  {Math.round((cat.count / failureSummary.total) * 100)}%
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Records Table */}
       <div className="bg-card/60 border border-border/70 rounded-2xl overflow-hidden">
         <div className="overflow-x-auto no-scrollbar">
-          <table className="w-full min-w-[760px]">
+          <table className="w-full min-w-[860px]">
             <thead>
               <tr className="border-b border-border/70">
                 <th className="text-left text-sm font-medium text-foreground/50 px-5 py-4">用户</th>
@@ -241,6 +404,7 @@ export default function GenerationsPage() {
                 <th className="text-left text-sm font-medium text-foreground/50 px-5 py-4 max-w-xs">提示词</th>
                 <th className="text-center text-sm font-medium text-foreground/50 px-5 py-4">状态</th>
                 <th className="text-right text-sm font-medium text-foreground/50 px-5 py-4">积分</th>
+                <th className="text-right text-sm font-medium text-foreground/50 px-5 py-4">耗时</th>
                 <th className="text-right text-sm font-medium text-foreground/50 px-5 py-4">时间</th>
                 <th className="text-right text-sm font-medium text-foreground/50 px-5 py-4">操作</th>
               </tr>
@@ -251,10 +415,25 @@ export default function GenerationsPage() {
                 return (
                 <tr key={record.id} className="border-b border-border/70 hover:bg-card/60">
                   <td className="px-5 py-4">
-                    <div>
-                      <p className="text-foreground font-medium">{record.userName || '-'}</p>
-                      <p className="text-xs text-foreground/40">{record.userEmail}</p>
-                    </div>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setUserFilter(
+                          userFilter?.userId === record.userId
+                            ? null
+                            : { userId: record.userId, label: record.userName || record.userEmail || record.userId }
+                        )
+                      }
+                      className="text-left group"
+                      title={userFilter?.userId === record.userId ? '取消该用户筛选' : '只看该用户的记录'}
+                    >
+                      <p className="text-foreground font-medium group-hover:text-primary transition-colors">
+                        {record.userName || '-'}
+                      </p>
+                      <p className="text-xs text-foreground/40 group-hover:text-primary/60 transition-colors">
+                        {record.userEmail}
+                      </p>
+                    </button>
                   </td>
                   <td className="px-5 py-4">
                     <span className="px-2 py-1 text-xs rounded-full bg-card/70 text-foreground/70 whitespace-nowrap">
@@ -263,16 +442,40 @@ export default function GenerationsPage() {
                         <span className="text-foreground/40 ml-1.5">{typeInfo.detail}</span>
                       )}
                     </span>
+                    {record.channelName && (
+                      <p
+                        className="text-xs text-foreground/40 mt-1 truncate max-w-[140px]"
+                        title={`渠道: ${record.channelName}${record.channelId ? ` (${record.channelId})` : ''}`}
+                      >
+                        {record.channelName}
+                      </p>
+                    )}
                   </td>
                   <td className="px-5 py-4 max-w-xs">
                     <p className="text-foreground/70 truncate" title={record.prompt}>
                       {record.prompt || '-'}
                     </p>
+                    {record.status === 'failed' && record.errorMessage && (
+                      <p
+                        className="text-xs text-red-400/80 truncate mt-1"
+                        title={record.errorMessage}
+                      >
+                        {record.errorMessage}
+                      </p>
+                    )}
                   </td>
                   <td className="px-5 py-4 text-center">
                     <StatusBadge status={record.status} />
+                    {needsRefundAttention(record) && (
+                      <p className="text-xs text-amber-400 mt-1 whitespace-nowrap" title="生成失败但积分未退还，请人工核对">
+                        未退款
+                      </p>
+                    )}
                   </td>
                   <td className="px-5 py-4 text-right text-red-400">-{record.cost}</td>
+                  <td className="px-5 py-4 text-right text-foreground/50 text-sm whitespace-nowrap">
+                    {formatDuration(record) || '-'}
+                  </td>
                   <td className="px-5 py-4 text-right text-foreground/50 text-sm">
                     {formatDate(record.createdAt)}
                   </td>

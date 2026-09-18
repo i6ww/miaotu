@@ -842,6 +842,9 @@ export async function getAllGenerations(options: {
   type?: string;
   status?: string;
   search?: string;
+  startTime?: number;
+  endTime?: number;
+  channelType?: string;
 } = {}): Promise<{ generations: any[]; total: number }> {
   await initializeCodesTables();
   const db = getAdapter();
@@ -863,6 +866,37 @@ export async function getAllGenerations(options: {
   if (options.status) {
     whereClauses.push('g.status = ?');
     params.push(options.status);
+  }
+  if (options.startTime !== undefined) {
+    whereClauses.push('g.created_at >= ?');
+    params.push(options.startTime);
+  }
+  if (options.endTime !== undefined) {
+    whereClauses.push('g.created_at <= ?');
+    params.push(options.endTime);
+  }
+  if (options.channelType) {
+    // Filter by the channel type that actually served the generation.
+    // Video: channel id lives in params.videoChannelId — avoid DB-specific JSON
+    // functions (MySQL json_extract needs UNQUOTE, SQLite differs), so match by
+    // LIKE on the channel UUIDs of that type instead.
+    // Image: channel id lives in generation_jobs.channel_id → image_channels.type.
+    const [videoChannelRows] = await db.execute(
+      'SELECT id FROM video_channels WHERE type = ?',
+      [options.channelType]
+    );
+    const videoChannelIds = (videoChannelRows as any[]).map(r => String(r.id)).filter(Boolean);
+    const videoLikeClauses = videoChannelIds.map(() => 'g.params LIKE ?');
+    const videoLikeParams = videoChannelIds.map(id => `%${id}%`);
+    whereClauses.push(
+      `((g.type = 'sora-video' AND (${videoLikeClauses.join(' OR ') || '0'}))
+        OR (g.type != 'sora-video' AND EXISTS (
+          SELECT 1 FROM generation_jobs jj
+          JOIN image_channels ic ON ic.id = jj.channel_id
+          WHERE jj.generation_id = g.id AND ic.type = ?
+        )))`
+    );
+    params.push(...videoLikeParams, options.channelType);
   }
   if (options.search) {
     const pattern = `%${options.search}%`;
@@ -903,11 +937,220 @@ export async function getAllGenerations(options: {
     cost: row.cost,
     status: row.status || 'completed',
     errorMessage: row.error_message,
+    balancePrecharged: Boolean(row.balance_precharged),
+    balanceRefunded: Boolean(row.balance_refunded),
     createdAt: Number(row.created_at),
     updatedAt: Number(row.updated_at || row.created_at),
-  }));
+  })) as Array<Record<string, unknown> & { id: string; type: string; params?: Record<string, unknown> }>;
+
+  // Attach channel names for admin visibility: video routes are recorded in
+  // generations.params.videoChannelId, image routes in generation_jobs.channel_id.
+  try {
+    const videoChannelIds = new Set<string>();
+    const imageGenerationIds: string[] = [];
+    for (const gen of generations) {
+      const videoChannelId = typeof gen.params?.videoChannelId === 'string' ? gen.params.videoChannelId : undefined;
+      if (videoChannelId) {
+        videoChannelIds.add(videoChannelId);
+      } else if (gen.type !== 'sora-video') {
+        imageGenerationIds.push(gen.id);
+      }
+    }
+
+    const channelIdToName = new Map<string, string>();
+
+    if (imageGenerationIds.length > 0) {
+      const jobPlaceholders = imageGenerationIds.map(() => '?').join(',');
+      const [jobRows] = await db.execute(
+        `SELECT generation_id, channel_id FROM generation_jobs WHERE generation_id IN (${jobPlaceholders})`,
+        imageGenerationIds
+      );
+      const imageChannelIds = new Set<string>();
+      const generationToChannel = new Map<string, string>();
+      for (const job of jobRows as any[]) {
+        if (job.channel_id) {
+          generationToChannel.set(job.generation_id, job.channel_id);
+          imageChannelIds.add(job.channel_id);
+        }
+      }
+      if (imageChannelIds.size > 0) {
+        const placeholders = Array.from(imageChannelIds).map(() => '?').join(',');
+        const [channelRows] = await db.execute(
+          `SELECT id, name FROM image_channels WHERE id IN (${placeholders})`,
+          Array.from(imageChannelIds)
+        );
+        for (const ch of channelRows as any[]) channelIdToName.set(ch.id, ch.name);
+      }
+      for (const gen of generations) {
+        const chId = generationToChannel.get(gen.id);
+        if (chId) {
+          gen.channelId = chId;
+          gen.channelName = channelIdToName.get(chId);
+        }
+      }
+    }
+
+    if (videoChannelIds.size > 0) {
+      const placeholders = Array.from(videoChannelIds).map(() => '?').join(',');
+      const [channelRows] = await db.execute(
+        `SELECT id, name FROM video_channels WHERE id IN (${placeholders})`,
+        Array.from(videoChannelIds)
+      );
+      for (const ch of channelRows as any[]) channelIdToName.set(ch.id, ch.name);
+      for (const gen of generations) {
+        const chId = typeof gen.params?.videoChannelId === 'string' ? gen.params.videoChannelId : undefined;
+        if (chId) {
+          gen.channelId = chId;
+          gen.channelName = channelIdToName.get(chId);
+        }
+      }
+    }
+  } catch (error) {
+    // Channel enrichment is best-effort; never fail the record listing because of it.
+    console.error('Enrich generation channels error:', error);
+  }
 
   return { generations, total };
+}
+
+// Classify a raw generation error message into a coarse failure category,
+// so admins can spot upstream outages (e.g. quota exhaustion storms) at a glance.
+function classifyFailureMessage(message: string | null | undefined): string {
+  const msg = (message || '').toLowerCase();
+  if (!msg) return 'unknown';
+  if (/insufficient_user_quota|insufficient quota|额度不足|余额不足|积分不足/.test(msg)) return 'quota';
+  if (/content_policy|content policy|审核|敏感|safety|blocked|违规|moderation/.test(msg)) return 'content';
+  if (/timeout|timed out|超时|etimedout|econnreset|econnrefused|enotfound|network|fetch failed/.test(msg)) return 'network';
+  if (/429|rate limit|rate_limit|限流|too many requests/.test(msg)) return 'rate_limit';
+  if (/500|502|503|504|internal server|bad gateway|service unavailable|unavailable|上游/.test(msg)) return 'upstream';
+  return 'other';
+}
+
+export const FAILURE_CATEGORY_LABELS: Record<string, string> = {
+  quota: '额度不足',
+  content: '内容审核',
+  network: '网络/超时',
+  rate_limit: '限流',
+  upstream: '上游服务错误',
+  other: '其他错误',
+  unknown: '未知错误',
+};
+
+// Aggregate failed generations by coarse error category for the admin dashboard.
+// Respects the same filters as the record list (except status, which is forced to failed).
+export async function getGenerationFailureSummary(options: {
+  userId?: string;
+  type?: string;
+  search?: string;
+  startTime?: number;
+  endTime?: number;
+  channelType?: string;
+} = {}): Promise<{
+  total: number;
+  categories: Array<{ key: string; label: string; count: number; topMessages: string[] }>;
+}> {
+  await initializeCodesTables();
+  const db = getAdapter();
+
+  const whereClauses: string[] = ["g.status = 'failed'"];
+  const params: unknown[] = [];
+
+  if (options.userId) {
+    whereClauses.push('g.user_id = ?');
+    params.push(options.userId);
+  }
+  if (options.type) {
+    whereClauses.push('g.type = ?');
+    params.push(options.type);
+  }
+  if (options.channelType) {
+    const [videoChannelRows] = await db.execute(
+      'SELECT id FROM video_channels WHERE type = ?',
+      [options.channelType]
+    );
+    const videoChannelIds = (videoChannelRows as any[]).map(r => String(r.id)).filter(Boolean);
+    const videoLikeClauses = videoChannelIds.map(() => 'g.params LIKE ?');
+    const videoLikeParams = videoChannelIds.map(id => `%${id}%`);
+    whereClauses.push(
+      `((g.type = 'sora-video' AND (${videoLikeClauses.join(' OR ') || '0'}))
+        OR (g.type != 'sora-video' AND EXISTS (
+          SELECT 1 FROM generation_jobs jj
+          JOIN image_channels ic ON ic.id = jj.channel_id
+          WHERE jj.generation_id = g.id AND ic.type = ?
+        )))`
+    );
+    params.push(...videoLikeParams, options.channelType);
+  }
+  if (options.startTime !== undefined) {
+    whereClauses.push('g.created_at >= ?');
+    params.push(options.startTime);
+  }
+  if (options.endTime !== undefined) {
+    whereClauses.push('g.created_at <= ?');
+    params.push(options.endTime);
+  }
+  const needsJoin = Boolean(options.search);
+  if (options.search) {
+    const pattern = `%${options.search}%`;
+    whereClauses.push('(u.email LIKE ? OR u.name LIKE ? OR g.prompt LIKE ?)');
+    params.push(pattern, pattern, pattern);
+  }
+
+  const whereStr = 'WHERE ' + whereClauses.join(' AND ');
+
+  // Group by exact message in SQL first to keep the row count small, then
+  // merge into coarse categories in application code.
+  const [rows] = await db.execute(
+    `SELECT g.error_message AS error_message, COUNT(1) AS count
+     FROM generations g
+     ${needsJoin ? 'LEFT JOIN users u ON g.user_id = u.id' : ''}
+     ${whereStr}
+     GROUP BY g.error_message
+     ORDER BY count DESC
+     LIMIT 300`,
+    params
+  );
+
+  const categoryMap = new Map<string, { count: number; messages: Array<{ message: string; count: number }> }>();
+  let total = 0;
+  for (const row of rows as any[]) {
+    const count = Number(row.count || 0);
+    const message = row.error_message ? String(row.error_message) : '';
+    const key = classifyFailureMessage(message);
+    total += count;
+    const bucket = categoryMap.get(key) || { count: 0, messages: [] };
+    bucket.count += count;
+    if (message) bucket.messages.push({ message, count });
+    categoryMap.set(key, bucket);
+  }
+
+  const categories = Array.from(categoryMap.entries())
+    .map(([key, bucket]) => ({
+      key,
+      label: FAILURE_CATEGORY_LABELS[key] || key,
+      count: bucket.count,
+      topMessages: bucket.messages
+        .slice(0, 2)
+        .map(m => (m.message.length > 120 ? m.message.slice(0, 120) + '…' : m.message)),
+    }))
+    .sort((a, b) => b.count - a.count);
+
+  return { total, categories };
+}
+
+// Distinct channel types across image and video channels, for the admin filter dropdown.
+export async function getAvailableChannelTypes(): Promise<string[]> {
+  await initializeCodesTables();
+  const db = getAdapter();
+  const [rows] = await db.execute(
+    `SELECT DISTINCT type FROM image_channels
+     UNION
+     SELECT DISTINCT type FROM video_channels`
+  );
+  return (rows as any[])
+    .map(r => (r.type ? String(r.type) : ''))
+    .filter(Boolean)
+    .sort();
 }
 
 export async function adminDeleteGeneration(id: string): Promise<boolean> {

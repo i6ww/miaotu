@@ -60,7 +60,7 @@ function extractClientRequestIdFromParams(params: unknown): string | null {
 async function backfillGenerationClientRequestIds(db: DatabaseAdapter): Promise<void> {
   try {
     const [rows] = await db.execute(
-      `SELECT id, params
+      `SELECT id, user_id, params
        FROM generations
        WHERE (client_request_id IS NULL OR client_request_id = '')
          AND params LIKE ?`,
@@ -73,6 +73,17 @@ async function backfillGenerationClientRequestIds(db: DatabaseAdapter): Promise<
       const clientRequestId = extractClientRequestIdFromParams(row.params);
       if (!clientRequestId) continue;
 
+      // Pre-check ownership so legacy duplicates are skipped without throwing,
+      // which avoids noisy constraint-error stack traces on every boot.
+      const [claimed] = await db.execute(
+        'SELECT id FROM generations WHERE user_id = ? AND client_request_id = ?',
+        [row.user_id, clientRequestId]
+      );
+      if ((claimed as any[]).some((r) => r.id !== row.id)) {
+        skipped += 1;
+        continue;
+      }
+
       try {
         const [result] = await db.execute(
           'UPDATE generations SET client_request_id = ? WHERE id = ? AND (client_request_id IS NULL OR client_request_id = ?)',
@@ -81,8 +92,13 @@ async function backfillGenerationClientRequestIds(db: DatabaseAdapter): Promise<
         if (getAffectedRows(result) > 0) updated += 1;
       } catch (error) {
         const e = error as { code?: string; errno?: number };
+        // MySQL raises ER_DUP_ENTRY (1062); better-sqlite3 raises
+        // SQLITE_CONSTRAINT_UNIQUE. Both mean the same thing here.
+        // Kept as a safety net for concurrent writes racing the pre-check.
         const isDuplicate =
-          e?.code === 'ER_DUP_ENTRY' || e?.errno === 1062;
+          e?.code === 'ER_DUP_ENTRY' ||
+          e?.errno === 1062 ||
+          e?.code === 'SQLITE_CONSTRAINT_UNIQUE';
         if (!isDuplicate) throw error;
         // Duplicate (user_id, client_request_id): another legacy row already
         // claims this request id. Leave this row untouched and keep going so a
@@ -96,10 +112,6 @@ async function backfillGenerationClientRequestIds(db: DatabaseAdapter): Promise<
     }
     if (skipped > 0) {
       console.log(`[DB] Skipped ${skipped} legacy generation row(s) whose client_request_id is already claimed`);
-    }
-
-    if (updated > 0) {
-      console.log(`[DB] Backfilled generation client_request_id values: ${updated}`);
     }
   } catch (error) {
     console.warn('[DB] Failed to backfill generation client_request_id values:', error);

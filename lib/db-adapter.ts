@@ -249,7 +249,9 @@ export class SQLiteAdapter implements DatabaseAdapter {
     if (error?.code !== 'SQLITE_ERROR') return true;
 
     const message = typeof error?.message === 'string' ? error.message : '';
-    return !message.includes('duplicate column name:');
+    // Idempotent migrations (ALTER TABLE re-adds, CREATE INDEX re-runs) are expected
+    // on every startup for SQLite, so keep them out of the logs.
+    return !message.includes('duplicate column name:') && !message.includes('already exists');
   }
 
   private convertSQLToSQLite(sql: string): string {
