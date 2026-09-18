@@ -490,7 +490,7 @@ export interface PaymentOrder {
   userId: string;
   outTradeNo: string;
   providerTradeNo?: string;
-  provider: 'easypay' | 'manual';
+  provider: 'easypay' | 'manual' | 'redemption';
   paymentType: string;
   amountCents: number;
   paidAmountCents: number;

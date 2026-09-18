@@ -210,9 +210,9 @@ export function BatchImageGenerationPage() {
     );
   }, []);
 
-  const loadModels = useCallback(async () => {
+  const loadModels = useCallback(async (isInitial = true) => {
     try {
-      setModelsLoading(true);
+      if (isInitial) setModelsLoading(true);
       const response = await fetch('/api/image-models', { cache: 'no-store' });
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.error || 'Failed to load models');
@@ -220,15 +220,20 @@ export function BatchImageGenerationPage() {
       const availableModels = (payload.data?.models || []) as SafeImageModel[];
       setModels(availableModels);
       if (availableModels.length > 0) {
-        const first = availableModels[0];
-        setSelectedModelId(first.id);
-        setAspectRatio(first.defaultAspectRatio || first.aspectRatios[0] || '1:1');
-        setImageSize(first.defaultImageSize || first.imageSizes?.[0] || '1K');
+        const fallback = availableModels[0];
+        setSelectedModelId((prev) => {
+          if (prev && availableModels.some((model) => model.id === prev)) return prev;
+          // fall back to the first model when the current one was disabled
+          setAspectRatio(fallback.defaultAspectRatio || fallback.aspectRatios[0] || '1:1');
+          setImageSize(fallback.defaultImageSize || fallback.imageSizes?.[0] || '1K');
+          return fallback.id;
+        });
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load models');
+      // keep the stale list on refresh failures; only surface errors on initial load
+      if (isInitial) setError(err instanceof Error ? err.message : 'Failed to load models');
     } finally {
-      setModelsLoading(false);
+      if (isInitial) setModelsLoading(false);
     }
   }, []);
 
@@ -258,13 +263,75 @@ export function BatchImageGenerationPage() {
     }
   }, []);
 
+  const deleteBatch = useCallback(
+    async (batchId: string, batchName: string) => {
+      if (!window.confirm(`Delete batch "${batchName}"? This cannot be undone.`)) return;
+      try {
+        const response = await fetch('/api/user/generation-batches', {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ batchId }),
+        });
+        const payload = await response.json();
+        if (!response.ok || !payload.success) {
+          throw new Error(payload.error || 'Failed to delete batch');
+        }
+        setRecentBatches((current) => current.filter((batch) => batch.batchId !== batchId));
+        toast({ title: '\u6279\u6b21\u5df2\u5220\u9664', description: `\u5df2\u5220\u9664 ${payload.deletedCount} \u6761\u8bb0\u5f55` });
+      } catch (err) {
+        toast({
+          title: '\u5220\u9664\u5931\u8d25',
+          description: err instanceof Error ? err.message : '\u5220\u9664\u5931\u8d25',
+          variant: 'destructive',
+        });
+      }
+    },
+    []
+  );
+
+  const deleteAllBatches = useCallback(async () => {
+    if (!window.confirm('Delete ALL batches? Active tasks are kept. This cannot be undone.')) return;
+    try {
+      const response = await fetch('/api/user/generation-batches', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ all: true }),
+      });
+      const payload = await response.json();
+      if (!response.ok || !payload.success) {
+        throw new Error(payload.error || 'Failed to delete batches');
+      }
+      setRecentBatches([]);
+      toast({ title: '\u5df2\u6e05\u7a7a\u6279\u6b21', description: `\u5df2\u5220\u9664 ${payload.deletedCount} \u6761\u8bb0\u5f55` });
+    } catch (err) {
+      toast({
+        title: '\u5220\u9664\u5931\u8d25',
+        description: err instanceof Error ? err.message : '\u5220\u9664\u5931\u8d25',
+        variant: 'destructive',
+      });
+    }
+  }, []);
+
   useEffect(() => {
     void loadModels();
     void loadDailyUsage();
     void loadRecentBatches();
     const abortControllers = abortControllersRef.current;
 
+    // Reload models on browser tab focus and a low-frequency poll so admin
+    // channel/model toggles reach open user pages quickly.
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') void loadModels(false);
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
+
+    const timer = setInterval(() => {
+      if (!document.hidden) void loadModels(false);
+    }, 60000);
+
     return () => {
+      document.removeEventListener('visibilitychange', handleVisibility);
+      clearInterval(timer);
       abortControllers.forEach((controller) => controller.abort());
       tasks.forEach((task) => task.images.forEach((image) => URL.revokeObjectURL(image.preview)));
     };
@@ -797,13 +864,25 @@ export function BatchImageGenerationPage() {
                 <History className="h-4 w-4 text-sky-300" />
                 {'\u6700\u8fd1\u6279\u6b21'}
               </div>
-              <button
-                type="button"
-                onClick={() => void loadRecentBatches()}
-                className="text-xs text-sky-300 transition hover:text-sky-200"
-              >
-                {'\u5237\u65b0'}
-              </button>
+              <div className="flex items-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => void loadRecentBatches()}
+                  className="text-xs text-sky-300 transition hover:text-sky-200"
+                >
+                  {'\u5237\u65b0'}
+                </button>
+                {recentBatches.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => void deleteAllBatches()}
+                    className="inline-flex items-center gap-1 text-xs text-red-300 transition hover:text-red-200"
+                  >
+                    <Trash2 className="h-3 w-3" />
+                    {'\u6e05\u7a7a'}
+                  </button>
+                )}
+              </div>
             </div>
             <div className="space-y-2 p-3">
               {recentBatches.length === 0 ? (
@@ -820,9 +899,20 @@ export function BatchImageGenerationPage() {
                           {batch.samplePrompt || batch.batchId.slice(0, 8)}
                         </p>
                       </div>
+                    <div className="flex items-center gap-2">
                       <span className="shrink-0 rounded-full border border-border/70 px-2 py-0.5 text-[11px] text-foreground/50">
                         {batch.total}
                       </span>
+                      <button
+                        type="button"
+                        onClick={() => void deleteBatch(batch.batchId, batch.batchName)}
+                        className="shrink-0 rounded-md p-1.5 text-foreground/40 transition hover:bg-red-500/10 hover:text-red-300"
+                        title={'\u5220\u9664\u6b64\u6279\u6b21'}
+                        aria-label={'\u5220\u9664\u6b64\u6279\u6b21'}
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
                     </div>
                     <div className="mt-2 grid grid-cols-3 gap-1.5 text-center text-xs">
                       <div className="rounded-md bg-emerald-500/10 py-1.5 text-emerald-300">

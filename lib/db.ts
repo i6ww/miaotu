@@ -2582,6 +2582,60 @@ export async function deleteAllFailedGenerations(userId: string): Promise<number
   return (result as any).affectedRows || 0;
 }
 
+// Escape LIKE wildcards inside a batchId before embedding it in a params pattern
+function escapeLikePattern(value: string): string {
+  return value.replace(/[\\%_]/g, (char) => `\\${char}`);
+}
+
+// Delete all generation records of one batch (active tasks are kept)
+export async function deleteGenerationBatch(batchId: string, userId: string): Promise<number> {
+  await initializeDatabase();
+  const db = getAdapter();
+  const paramsPattern = `%"batchId":"${escapeLikePattern(batchId)}"%`;
+
+  await db.execute(
+    `DELETE FROM generation_jobs
+     WHERE user_id = ?
+       AND generation_id IN (
+         SELECT id FROM generations
+         WHERE user_id = ? AND params LIKE ? AND status NOT IN ('pending', 'processing')
+       )`,
+    [userId, userId, paramsPattern]
+  );
+
+  const [result] = await db.execute(
+    `DELETE FROM generations
+     WHERE user_id = ? AND params LIKE ? AND status NOT IN ('pending', 'processing')`,
+    [userId, paramsPattern]
+  );
+
+  return (result as any).affectedRows || 0;
+}
+
+// Delete all batch generation records (active tasks are kept)
+export async function deleteAllGenerationBatches(userId: string): Promise<number> {
+  await initializeDatabase();
+  const db = getAdapter();
+
+  await db.execute(
+    `DELETE FROM generation_jobs
+     WHERE user_id = ?
+       AND generation_id IN (
+         SELECT id FROM generations
+         WHERE user_id = ? AND params LIKE ? AND status NOT IN ('pending', 'processing')
+       )`,
+    [userId, userId, '%"batchId"%']
+  );
+
+  const [result] = await db.execute(
+    `DELETE FROM generations
+     WHERE user_id = ? AND params LIKE ? AND status NOT IN ('pending', 'processing')`,
+    [userId, '%"batchId"%']
+  );
+
+  return (result as any).affectedRows || 0;
+}
+
 // 获取用户今日使用量统计
 export interface DailyUsageStats {
   imageCount: number;
