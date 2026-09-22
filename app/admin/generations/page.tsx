@@ -5,6 +5,7 @@ import { History, Trash2, Search, Loader2, Eye, X } from 'lucide-react';
 import { formatDate, cn } from '@/lib/utils';
 import { IMAGE_MODELS } from '@/lib/model-config';
 import { inferImageSizeLabel, aspectRatioOfSize } from '@/lib/image-sizing';
+import { IMAGE_QUALITY_OPTIONS, isQualityAwareModelName } from '@/lib/image-quality';
 import { toast } from '@/components/ui/toaster';
 import { PaginationControls } from '@/components/admin/pagination';
 
@@ -125,6 +126,14 @@ const TYPE_LABELS: Record<string, string> = {
   'gitee-image': 'Gitee 图像',
 };
 
+// Map a quality value to its display label, reusing the same strings the user
+// picker shows (`IMAGE_QUALITY_OPTIONS` in lib/image-quality.ts) so admin and
+// the user see the same word for the same value.
+function qualityLabel(quality: string): string {
+  const match = IMAGE_QUALITY_OPTIONS.find((option) => option.value === quality);
+  return match?.label ?? quality;
+}
+
 // Build the human readable "tier ratio" suffix from recorded params, e.g. "1K 16:9".
 // imageSize already holds the normalized tier (1K/2K/4K); for legacy records without it
 // we fall back to inferring both tier and ratio from the raw pixel size.
@@ -136,6 +145,13 @@ function getResolutionDetail(params?: GenerationParams): string | undefined {
   if (tier) parts.push(tier);
   if (ratio) parts.push(ratio);
   if (parts.length === 0 && params.size) parts.push(params.size);
+  // `params.quality` is only populated by `resolveImageQuality`, which returns
+  // `undefined` for models that don't participate in the quality pipeline. So a
+  // non-empty value implies the model is quality-aware; the model-name check
+  // is belt-and-suspenders against future writes from non-standard paths.
+  if (params.quality && isQualityAwareModelName(params.model)) {
+    parts.push(qualityLabel(params.quality));
+  }
   return parts.length > 0 ? parts.join(' ') : undefined;
 }
 

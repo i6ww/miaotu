@@ -23,6 +23,13 @@ import { GenerationErrorAlert } from '@/components/generator/generation-error-al
 import { cn, formatBalance } from '@/lib/utils';
 import { compressImageToWebP, fileToBase64 } from '@/lib/image-compression';
 import {
+  DEFAULT_IMAGE_QUALITY,
+  IMAGE_QUALITY_OPTIONS,
+  getQualityOptions,
+  resolveImageQuality,
+  supportsQualityControl,
+} from '@/lib/image-quality';
+import {
   fetchGenerationSubmit,
   pollGenerationTask,
   type GenerationStatusPayload,
@@ -173,6 +180,7 @@ export function BatchImageGenerationPage() {
   const [selectedModelId, setSelectedModelId] = useState('');
   const [aspectRatio, setAspectRatio] = useState('1:1');
   const [imageSize, setImageSize] = useState('1K');
+  const [quality, setQuality] = useState(DEFAULT_IMAGE_QUALITY);
   const [tasks, setTasks] = useState<BatchTask[]>(() =>
     Array.from({ length: DEFAULT_TASK_COUNT }, (_, index) => createEmptyTask(index + 1))
   );
@@ -186,6 +194,23 @@ export function BatchImageGenerationPage() {
     () => models.find((model) => model.id === selectedModelId),
     [models, selectedModelId]
   );
+
+  // Falls back to the full list so a disabled control still shows which
+  // qualities exist, mirroring the resolution picker above.
+  const qualityOptions = useMemo(() => {
+    const options = getQualityOptions(currentModel);
+    return options.length > 0 ? options : IMAGE_QUALITY_OPTIONS;
+  }, [currentModel]);
+
+  // Single convergence point for the global quality: switching models and a
+  // background model-list refresh (an admin may edit qualityOptions at any time)
+  // both funnel through here, so the picker never shows a value the request
+  // cannot carry.
+  useEffect(() => {
+    if (!currentModel) return;
+    const next = resolveImageQuality(currentModel, quality);
+    if (next && next !== quality) setQuality(next);
+  }, [currentModel, quality]);
 
   const runnableTasks = useMemo(
     () =>
@@ -204,11 +229,21 @@ export function BatchImageGenerationPage() {
     ? Math.max(0, dailyUsage.imageLimit - dailyUsage.imageCount)
     : Infinity;
 
-  const updateTask = useCallback((taskId: string, patch: Partial<BatchTask>) => {
-    setTasks((current) =>
-      current.map((task) => (task.id === taskId ? { ...task, ...patch } : task))
-    );
-  }, []);
+  const updateTask = useCallback(
+    (
+      taskId: string,
+      patch: Partial<BatchTask> | ((task: BatchTask) => Partial<BatchTask>)
+    ) => {
+      setTasks((current) =>
+        current.map((task) =>
+          task.id === taskId
+            ? { ...task, ...(typeof patch === 'function' ? patch(task) : patch) }
+            : task
+        )
+      );
+    },
+    []
+  );
 
   const loadModels = useCallback(async (isInitial = true) => {
     try {
@@ -490,20 +525,23 @@ export function BatchImageGenerationPage() {
           },
           onFailed: async (message: string, payload) => {
             if (!payload) {
-              updateTask(task.id, {
-                status: task.status === 'processing' ? 'processing' : 'pending',
+              // `task` is a snapshot taken at submit time, so its status is stale
+              // here; read the live status to avoid dragging an already-advanced
+              // task back to 'pending'.
+              updateTask(task.id, (current) => ({
+                status: current.status === 'processing' ? 'processing' : 'pending',
                 error: message,
-              });
+              }));
               return;
             }
 
             updateTask(task.id, { status: 'failed', error: message, progress: 0 });
           },
           onTimeout: async () => {
-            updateTask(task.id, {
-              status: task.status === 'processing' ? 'processing' : 'pending',
+            updateTask(task.id, (current) => ({
+              status: current.status === 'processing' ? 'processing' : 'pending',
               error: '任务仍在处理中，请稍后到历史记录查看最终结果。',
-            });
+            }));
           },
         });
       } finally {
@@ -550,6 +588,7 @@ export function BatchImageGenerationPage() {
           prompt: task.prompt.trim(),
           aspectRatio: taskAspectRatio,
           imageSize: taskImageSize,
+          quality: resolveImageQuality(taskModel, quality),
           images,
           clientRequestId: createId('batch-image'),
           batchId: batchContext?.batchId,
@@ -572,7 +611,7 @@ export function BatchImageGenerationPage() {
       });
       void pollTask(task, generationId);
     },
-    [aspectRatio, imageSize, models, pollTask, selectedModelId, updateTask]
+    [aspectRatio, imageSize, models, pollTask, quality, selectedModelId, updateTask]
   );
 
   const submitTasks = useCallback(
@@ -710,7 +749,7 @@ export function BatchImageGenerationPage() {
           </div>
         </div>
 
-        <div className="grid gap-3 p-4 lg:grid-cols-[minmax(240px,1.25fr)_minmax(150px,0.7fr)_minmax(150px,0.7fr)_auto] lg:items-end">
+        <div className="grid gap-3 p-4 lg:grid-cols-[minmax(240px,1.25fr)_repeat(3,minmax(130px,0.7fr))_auto] lg:items-end">
           <div className="space-y-1.5">
             <div className="flex items-center justify-between gap-3">
               <label className="text-xs uppercase tracking-wider text-foreground/45">{'\u6a21\u578b'}</label>
@@ -742,6 +781,15 @@ export function BatchImageGenerationPage() {
               onValueChange={setImageSize}
               options={sizeOptions}
               disabled={!currentModel?.features.imageSize}
+            />
+          </div>
+          <div className="space-y-1.5">
+            <label className="text-xs uppercase tracking-wider text-foreground/45">{'\u753b\u8d28'}</label>
+            <CustomSelect
+              value={quality}
+              onValueChange={setQuality}
+              options={qualityOptions}
+              disabled={!supportsQualityControl(currentModel)}
             />
           </div>
           <button

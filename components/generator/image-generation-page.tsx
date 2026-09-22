@@ -40,6 +40,7 @@ import {
   type ReusableImageReference,
 } from '@/lib/generation-client';
 import { getGenerationErrorCopy } from '@/lib/polling-utils';
+import { DEFAULT_IMAGE_QUALITY, getQualityOptions, resolveImageQuality } from '@/lib/image-quality';
 
 const ResultGallery = dynamic(
   () => import('@/components/generator/result-gallery').then((mod) => mod.ResultGallery),
@@ -124,7 +125,7 @@ export function ImageGenerationPage({
   const [selectedModelId, setSelectedModelId] = useState<string>('');
   const [aspectRatio, setAspectRatio] = useState<string>('1:1');
   const [imageSize, setImageSize] = useState<string>('1K');
-  const [quality, setQuality] = useState<string>('medium');
+  const [quality, setQuality] = useState<string>(DEFAULT_IMAGE_QUALITY);
   const [prompt, setPrompt] = useState('');
   const [images, setImages] = useState<Array<{ file: File; preview: string }>>([]);
   const [generations, setGenerations] = useState<Generation[]>([]);
@@ -704,7 +705,7 @@ export function ImageGenerationPage({
         prompt: taskPrompt,
         aspectRatio,
         imageSize: currentModel.features.imageSize ? imageSize : undefined,
-        quality: (currentModel.channelType === 'apexerapi' || currentModel.channelType === 'openai-compatible' || currentModel.channelType === 'openai-chat') && currentModel.apiModel.toLowerCase().includes('gpt-image-2') && (!currentModel.features.qualityOptions || currentModel.features.qualityOptions.length === 0 || currentModel.features.qualityOptions.includes(quality)) ? quality : undefined,
+        quality: resolveImageQuality(currentModel, quality),
         images: compressedImages || [],
         referenceImageUrl: externalReference?.sourceUrl,
         clientRequestId,
@@ -1002,19 +1003,9 @@ export function ImageGenerationPage({
 
               {(() => {
                 if (!currentModel) return null;
-                if (currentModel.channelType !== 'apexerapi' && currentModel.channelType !== 'openai-compatible' && currentModel.channelType !== 'openai-chat') return null;
-                if (!currentModel.apiModel.toLowerCase().includes('gpt-image-2')) return null;
-                const qOpts = currentModel.features.qualityOptions;
-                const allQualities = [
-                  { value: 'low', label: '低' },
-                  { value: 'medium', label: '中' },
-                  { value: 'high', label: '高' },
-                ];
-                const available = qOpts && qOpts.length > 0
-                  ? allQualities.filter(q => qOpts.includes(q.value))
-                  : allQualities;
+                const available = getQualityOptions(currentModel);
                 if (available.length === 0) return null;
-                const safeValue = available.some(q => q.value === quality) ? quality : available[0].value;
+                const safeValue = resolveImageQuality(currentModel, quality) ?? quality;
                 if (safeValue !== quality) {
                   queueMicrotask(() => setQuality(safeValue));
                 }

@@ -30,6 +30,11 @@ const DEFAULT_FEATURES: ImageModelFeatures = {
   imageSize: false,
 };
 
+// Quality options offered to users, in display order (high -> low). The values
+// must match IMAGE_QUALITY_OPTIONS in lib/image-quality.ts; the order here only
+// affects how the checkboxes are presented.
+const QUALITY_OPTION_VALUES = ['high', 'medium', 'low'] as const;
+
 type RatioResolutionRow = {
   ratio: string;
   resolution: string;
@@ -1688,30 +1693,37 @@ export default function ImageChannelsPage() {
               <div className="pt-1">
                 <label className="text-sm text-foreground/70">画质选项</label>
                 <div className="flex flex-wrap gap-4 mt-2">
-                  {['high', 'medium', 'low'].map((q) => {
+                  {QUALITY_OPTION_VALUES.map((q) => {
                     const options = modelForm.features.qualityOptions;
-                    const checked = !options || options.length === 0 || options.includes(q);
+                    // An empty or undefined list means "all options enabled", so
+                    // normalize it to an explicit list before comparing.
+                    const enabled: string[] =
+                      options && options.length > 0 ? options : [...QUALITY_OPTION_VALUES];
+                    const checked = enabled.includes(q);
+                    // Persisting an empty list would read back as "all enabled" and
+                    // silently re-check every box, so the last checked option cannot
+                    // be turned off.
+                    const isLastChecked = checked && enabled.length === 1;
                     return (
-                      <label key={q} className="flex items-center gap-2 cursor-pointer">
+                      <label
+                        key={q}
+                        className={`flex items-center gap-2 ${isLastChecked ? 'cursor-not-allowed' : 'cursor-pointer'}`}
+                      >
                         <input
                           type="checkbox"
                           checked={checked}
+                          disabled={isLastChecked}
+                          title={isLastChecked ? '至少保留一个画质选项' : undefined}
                           onChange={(e) => {
-                            const current = modelForm.features.qualityOptions;
-                            let next: string[];
-                            if (!current || current.length === 0) {
-                              next = ['high', 'medium', 'low'].filter(v => v !== q);
-                            } else {
-                              next = e.target.checked
-                                ? [...current, q]
-                                : current.filter(v => v !== q);
-                            }
+                            const next = e.target.checked
+                              ? [...enabled, q]
+                              : enabled.filter((v) => v !== q);
                             setModelForm({
                               ...modelForm,
                               features: { ...modelForm.features, qualityOptions: next },
                             });
                           }}
-                          className="w-4 h-4 rounded border-border/70 bg-card/60 text-sky-500 focus:ring-sky-500"
+                          className="w-4 h-4 rounded border-border/70 bg-card/60 text-sky-500 focus:ring-sky-500 disabled:opacity-50 disabled:cursor-not-allowed"
                         />
                         <span className="text-sm text-foreground/70">
                           {q === 'high' ? '高' : q === 'medium' ? '中' : '低'}
@@ -1720,7 +1732,7 @@ export default function ImageChannelsPage() {
                     );
                   })}
                 </div>
-                <p className="text-xs text-foreground/40 mt-1">取消勾选即隐藏对应画质选项</p>
+                <p className="text-xs text-foreground/40 mt-1">取消勾选即隐藏对应画质选项（至少保留一项）</p>
               </div>
             )}
           </div>
