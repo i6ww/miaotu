@@ -191,13 +191,11 @@ export function ImageGenerationPage({
         setAvailableModels(models);
 
         if (models.length > 0) {
+          // Keep the updater pure: the fallback model's default aspect ratio and
+          // image size are applied by the model-change effect below.
           setSelectedModelId((prev) => {
             if (prev && models.some((model: SafeImageModel) => model.id === prev)) return prev;
             // fall back to the first model when the current one was disabled
-            setAspectRatio(models[0].defaultAspectRatio);
-            if (models[0].defaultImageSize) {
-              setImageSize(models[0].defaultImageSize);
-            }
             return models[0].id;
           });
         }
@@ -251,6 +249,12 @@ export function ImageGenerationPage({
     void loadDailyUsage();
   }, [isActive]);
 
+  // appliedModelRef records the model whose defaults were already applied.
+  // availableModels is a brand-new array (and new model objects) after every
+  // poll / tab-focus refresh, so it must not be used to detect a model switch:
+  // doing so reset the user's manually picked aspect ratio and image size.
+  const appliedModelRef = useRef<string>('');
+
   useEffect(() => {
     if (!isActiveRef.current) {
       return;
@@ -259,16 +263,19 @@ export function ImageGenerationPage({
     const model = availableModels.find((item) => item.id === selectedModelId);
     if (!model) return;
 
-    setAspectRatio(model.defaultAspectRatio);
-    if (model.defaultImageSize) {
-      setImageSize(model.defaultImageSize);
+    if (appliedModelRef.current !== model.id) {
+      appliedModelRef.current = model.id;
+      setAspectRatio(model.defaultAspectRatio);
+      if (model.defaultImageSize) {
+        setImageSize(model.defaultImageSize);
+      }
     }
 
     if (!model.features.imageToImage) {
-      clearImages();
-      onClearExternalReference?.();
+      if (images.length > 0) clearImages();
+      if (externalReference) onClearExternalReference?.();
     }
-  }, [availableModels, clearImages, onClearExternalReference, selectedModelId]);
+  }, [availableModels, clearImages, externalReference, images.length, onClearExternalReference, selectedModelId]);
 
   useEffect(() => {
     if (!externalReference || images.length === 0) return;

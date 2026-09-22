@@ -287,7 +287,7 @@ export function VideoGenerationView({
   // Reload models on tab activation, browser tab focus and a low-frequency
   // poll so admin channel/model toggles reach open user pages quickly.
   useEffect(() => {
-    if (!isActive || modelsLoaded) {
+    if (!isActive) {
       return;
     }
 
@@ -306,11 +306,11 @@ export function VideoGenerationView({
           setAvailableModels(models);
 
           if (models.length > 0) {
+            // Keep the updater pure: the fallback model's default aspect ratio and
+            // duration are applied by the model-change effect below.
             setSelectedModelId((prev) => {
               if (prev && models.some((model: SafeVideoModel) => model.id === prev)) return prev;
               // fall back to the first model when the current one was disabled
-              setAspectRatio(models[0].defaultAspectRatio);
-              setDuration(models[0].defaultDuration);
               return models[0].id;
             });
           }
@@ -323,7 +323,9 @@ export function VideoGenerationView({
       }
     };
 
-    void refreshModels(true);
+    if (!modelsLoaded) {
+      void refreshModels(true);
+    }
 
     const handleVisibility = () => {
       if (document.visibilityState === 'visible') {
@@ -363,6 +365,11 @@ export function VideoGenerationView({
     void loadDailyUsage();
   }, [isActive]);
 
+  // appliedModelRef 记录已经套用过默认参数的模型：availableModels 在每次轮询 /
+  // 切标签刷新后都是全新的数组与对象引用，不能用来判断“模型是否已切换”，
+  // 否则会把用户选好的比例、时长重置回默认值，并误清空已上传的参考素材。
+  const appliedModelRef = useRef<string>('');
+
   // 当模型改变时，重置参数到默认值
   useEffect(() => {
     if (!isActiveRef.current) {
@@ -371,8 +378,11 @@ export function VideoGenerationView({
 
     const model = availableModels.find(m => m.id === selectedModelId);
     if (model) {
-      setAspectRatio(model.defaultAspectRatio);
-      setDuration(model.defaultDuration);
+      if (appliedModelRef.current !== model.id) {
+        appliedModelRef.current = model.id;
+        setAspectRatio(model.defaultAspectRatio);
+        setDuration(model.defaultDuration);
+      }
       if (!model.features.imageToVideo && files.length > 0) {
         clearFiles();
       }
