@@ -12,7 +12,7 @@
 
 - [Executive Summary](#executive-summary)
 - [Critical (1)](#critical)
-- [High (8)](#high)
+- [High (9)](#high)
 - [Medium (10)](#medium)
 - [Low (13)](#low)
 - [跨切片建议](#跨切片建议)
@@ -26,16 +26,16 @@
 | 严重度 | 数量 | 主要影响类别 |
 | --- | --- | --- |
 | Critical | 1 | 直接资金损失（重复白嫖） |
-| High | 8 | 资金损失、账号接管、SSRF、进程级 DoS、代码设计错误 |
+| High | 9 | 资金损失、账号接管、SSRF、进程级 DoS、代码设计错误 |
 | Medium | 10 | 资金边缘损失、隐私泄漏、单点 500、功能失效 |
 | Low | 13 | 鲁棒性、日志卫生、API 契约 |
-| **合计** | **32** | — |
+| **合计** | **33** | — |
 
 **资金类问题（5 项）**：C1, H1, H4, H5, M8 → 建议 1-2 个 sprint 内全部处理。
 
 **安全类问题（6 项）**：H2, H3, H4, H7, M3, M4 → 涉及账号接管 / SSRF / 暴力破解，需尽快处理。
 
-**可用性问题（5 项）**：H3, H6, H7, M2, M3 → 单个请求可拖垮进程或全部任务。
+**可用性问题（6 项）**：H3, H6, H7, H9, M2, M3 → 单个请求可拖垮进程或全部任务。
 
 **设计 / 契约问题（6 项）**：M6, M7, M8, L1, L6, L13 → 代码没崩但行为与预期不符。
 
@@ -313,6 +313,154 @@ lib/db-codes.ts:1018               params: typeof row.params === 'string' ? JSON
 **修复方案**：全部替换为 `parseJsonValue<Generation['params']>(row.params, {})`（db.ts 内已存在该 helper）；`disabled_image_models / disabled_video_models` 用 try/catch 包裹并回退 `[]`。
 
 **验证方式**：`UPDATE generations SET params = '{bad json' WHERE id = '<id>'`，修复前 `GET /api/generate/status/<id>` 返回 500，修复后返回 200 且 `params` 为 `{}`。
+
+---
+
+### H9 · 容器重启遗留孤儿 jobs + sweep 被并发预算挤掉 · **真实事故案例 2026-09-22**
+
+**现象**（来自 2026-09-22 服务器事故）：
+
+```ts
+// lib/generation-queue.ts:540-573 — tick() 入口
+async function tick(state: QueueRuntime) {
+  const config = await getSystemConfig();
+  const queueConfig = config.generationQueue;
+  if (!queueConfig.enabled) return;
+
+  const globalAvailable = Math.max(0, queueConfig.imageConcurrency - state.active);
+  if (globalAvailable <= 0) return;        // ← (a) sweep 和 claim 共用一个并发预算
+
+  const lockTimeoutMs = queueConfig.lockTimeoutSeconds * 1_000;
+  const expiredJobs = await sweepExpiredGenerationJobs(Math.max(1, globalAvailable));   // ← sweep 受 (a) 限制
+  for (const job of expiredJobs) {
+    void finalizeExpiredJob(job);          // ← mark failed + refund
+  }
+  ...
+}
+```
+
+```ts
+// lib/db.ts:2136-2149 — sweep 自身又有 hard 过滤
+SELECT * FROM generation_jobs
+ WHERE status = 'running'
+   AND locked_until < ?            -- lock 必须到期
+   AND attempts >= max_attempts    -- 必须"用完所有重试"
+ ORDER BY locked_until ASC, created_at ASC
+ LIMIT ${safeLimit}
+```
+
+```dockerfile
+# Dockerfile — 没有 STOPSIGNAL 与 graceful shutdown
+FROM node:20-alpine AS runner
+...
+CMD ["node", "server.js"]            # ← 收到 SIGTERM 直接进程退出，不释放 lock
+```
+
+**真实事故时序**：
+
+```
+T0   用户执行 `git pull` + `docker compose build sanhub && docker compose up -d sanhub`
+T0   旧容器（workerId=b0249defcc34-1-9ncbnt）在执行 8 条 generation
+T0   旧容器被 kill（默认 SIGKILL，10s 后）
+T0   新容器（workerId=b64df697b891-1-85lwzl）启动
+T0+1 新 worker 的 tick() 跑 → sweep 命中"locked_by='', locked_until=0"的那条（id=352779fd）
+     → finalizeExpiredJob 把它标 completed + 退还积分（实际是 completed，不退）
+T0+1 其它 7 条 job 的 lock 还停在 900s 后才到期 → sweep 现在拿不到
+T0+15分钟 7 条 lock 全部到期
+T0+15分钟 下一轮 tick sweep 命中 → mark failed + 退款 ✓
+```
+
+**事故当时看到的数据**：
+
+```
+generations.status='processing' 的 8 条全部卡在同一 channel
+  ↓
+  locked_by='b0249defcc34-1-9ncbnt'（旧 worker）
+  locked_until 在未来 7~31 秒
+  ↓
+  sweep 的 WHERE `locked_until < now` 不命中（lock 没到期）
+  ↓
+  sweep 的 WHERE `attempts >= max_attempts` 在 attempts=1/max_attempts=1 下能命中，但前置条件卡死
+```
+
+**影响**：
+- 任何一次**容器重启 / 部署** 都会留下遗孤 jobs，至少要等 `lockTimeoutSeconds`（默认 900s = 15 分钟）才能自然恢复；
+- 业务高峰期间 `state.active` 接近 `imageConcurrency` 时，**sweep 直接被 `return` 早退**，遗孤 jobs 永久卡死（需更激进的修复）；
+- 用户在前端看到的"处理中"最长能拖 15 分钟，期间无法提交新任务或撤销，造成客诉（本次事故里 `576668740@qq.com` 一人占 5 条，催了客服）。
+
+**根因（三层叠加）**：
+
+1. **没有优雅停服**：`Dockerfile` 没 `STOPSIGNAL` / 没 SIGTERM handler，容器被 kill 时正在执行的 job 的 lock 不会被主动释放，必须等自然到期；
+2. **sweep 与 claim 共用并发预算**：`tick()` 把"扫过期"和"接新单"绑在同一个 `globalAvailable` 上，sweep 没有自己的预算；
+3. **sweep 硬过滤 `attempts >= max_attempts`**：理论上 `max_attempts=1` + `attempts=1` 时能命中，但下游若改成 `max_attempts>1`，首次卡死（attempts=0）就**永久**不会被扫到。
+
+**修复方案**：
+
+1. **优雅停服**（最关键）：
+   - `Dockerfile` 加 `STOPSIGNAL SIGTERM`
+   - `docker-entrypoint.sh` 加 trap：
+     ```sh
+     trap 'echo "[SanHub] Shutting down..."; kill -TERM $NODE_PID; wait $NODE_PID' TERM
+     ```
+   - 在 Next.js 启动脚本里监听 SIGTERM：先把 `generation_queue.enabled=false`，等所有 running 任务结算（最长 60s），再 `process.exit(0)`
+
+2. **sweep 独立预算**：
+   ```ts
+   // tick() 拆成两步：sweep 永远跑，claim 受并发限制
+   const sweepBudget = Math.max(8, queueConfig.imageConcurrency / 4);
+   const expiredJobs = await sweepExpiredGenerationJobs(sweepBudget);
+   for (const job of expiredJobs) void finalizeExpiredJob(job);
+
+   const globalAvailable = Math.max(0, queueConfig.imageConcurrency - state.active);
+   if (globalAvailable > 0) {
+     const candidates = await claimGenerationJobs(...);
+     ...
+   }
+   ```
+
+3. **放宽 sweep 条件**：
+   ```sql
+   -- lib/db.ts:2136-2149
+   WHERE status = 'running'
+     AND locked_until < ?
+     AND attempts > 0              -- 改成 ">0" 而不是 ">= max_attempts"
+   -- 这样 max_attempts=2 的首次卡死也能被扫
+   ```
+
+4. **降低 `lockTimeoutSeconds` 默认值**：从 900 改为 300（5 分钟），减少用户等待时间
+
+**验证方式**：
+
+```bash
+# 1. 触发场景模拟
+docker compose up -d sanhub                    # 重启容器
+docker exec -i sanhub-mysql mysql -uroot -p"$MYSQL_ROOT_PASSWORD" sanhub -e \
+  "SELECT id, status, locked_by, locked_until FROM generation_jobs WHERE status='running';"
+
+# 修复前：旧 worker 的 jobs 在 15 分钟后才被 sweep
+# 修复后：优雅停服时锁被主动释放；或 sweep 在 5 分钟内回收
+
+# 2. 单元测试
+# mock tick() 让 state.active = imageConcurrency，验证 sweep 仍跑
+
+# 3. 事故重现
+# 准备 5 条 running jobs → 重启容器 → 立即看 sweep 是否触发
+```
+
+**事故后现场状态**（2026-09-22 修复前）：
+
+```
+A. 8 条 generations 最终状态：
+   - 7 条 'failed' + balance_refunded=1 + err="Generation job expired after reaching max attempts"
+   - 1 条 'completed' + balance_refunded=0（用户拿到了图）
+B. 4 个用户余额与预期一致：
+   - 1541314966@qq.com   1485  (= 1470 + 15)
+   - 17819386903@163.com  605   (= 625 - 20 completed)
+   - 576668740@qq.com    987   (= 947 + 100 退款 - 60 新生成)
+   - 749873830@qq.com    1450  (= 1430 + 20)
+C. generation_jobs 全表只剩 succeeded/failed，无 running
+D. 结论：系统自愈了，但用了 15 分钟
+```
 
 ---
 
