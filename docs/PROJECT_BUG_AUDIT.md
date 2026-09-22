@@ -12,7 +12,7 @@
 
 - [Executive Summary](#executive-summary)
 - [Critical (1)](#critical)
-- [High (9)](#high)
+- [High (10)](#high)
 - [Medium (10)](#medium)
 - [Low (13)](#low)
 - [跨切片建议](#跨切片建议)
@@ -26,16 +26,16 @@
 | 严重度 | 数量 | 主要影响类别 |
 | --- | --- | --- |
 | Critical | 1 | 直接资金损失（重复白嫖） |
-| High | 9 | 资金损失、账号接管、SSRF、进程级 DoS、代码设计错误 |
+| High | 10 | 资金损失、账号接管、SSRF、进程级 DoS、代码设计错误 |
 | Medium | 10 | 资金边缘损失、隐私泄漏、单点 500、功能失效 |
 | Low | 13 | 鲁棒性、日志卫生、API 契约 |
-| **合计** | **33** | — |
+| **合计** | **34** | — |
 
 **资金类问题（5 项）**：C1, H1, H4, H5, M8 → 建议 1-2 个 sprint 内全部处理。
 
 **安全类问题（6 项）**：H2, H3, H4, H7, M3, M4 → 涉及账号接管 / SSRF / 暴力破解，需尽快处理。
 
-**可用性问题（6 项）**：H3, H6, H7, H9, M2, M3 → 单个请求可拖垮进程或全部任务。
+**可用性问题（7 项）**：H3, H6, H7, H9, H10, M2, M3 → 单个请求可拖垮进程或全部任务。
 
 **设计 / 契约问题（6 项）**：M6, M7, M8, L1, L6, L13 → 代码没崩但行为与预期不符。
 
@@ -388,15 +388,43 @@ generations.status='processing' 的 8 条全部卡在同一 channel
 - 业务高峰期间 `state.active` 接近 `imageConcurrency` 时，**sweep 直接被 `return` 早退**，遗孤 jobs 永久卡死（需更激进的修复）；
 - 用户在前端看到的"处理中"最长能拖 15 分钟，期间无法提交新任务或撤销，造成客诉（本次事故里 `576668740@qq.com` 一人占 5 条，催了客服）。
 
-**根因（三层叠加）**：
+**根因（分层归因，事故后修正）**：
 
-1. **没有优雅停服**：`Dockerfile` 没 `STOPSIGNAL` / 没 SIGTERM handler，容器被 kill 时正在执行的 job 的 lock 不会被主动释放，必须等自然到期；
-2. **sweep 与 claim 共用并发预算**：`tick()` 把"扫过期"和"接新单"绑在同一个 `globalAvailable` 上，sweep 没有自己的预算；
-3. **sweep 硬过滤 `attempts >= max_attempts`**：理论上 `max_attempts=1` + `attempts=1` 时能命中，但下游若改成 `max_attempts>1`，首次卡死（attempts=0）就**永久**不会被扫到。
+> **修正说明**：原本把这版归到"重启遗孤 + sweep 被挤"，但 2026-09-22 事故中用户确认**部署之前就已观察到卡死**——说明重启只是放大了症状，真正的根因是更底层。下面按"底层 → 表层"排列：
+
+**底层（真正的病因）**：
+- **上游 hang 不报错**：`imageAgent.bodyTimeout: 0`（H3）允许上游接受请求后永远不返回 body；上游（例如 `bc61379f` 渠道 + `fd56462c` 模型）某次开始 hang 时，worker 进程不退出、lock 一直被续（每 5 min 一次）、job 永远不推进。本次事故里 **6 条卡死 50+ 分钟** 全部同模型同渠道（`fd56462c + bc61379f`），是上游 hang 的强证据。
+- **缺渠道级 circuit breaker / 健康检查**：单渠道进入 hang 状态后，无任何机制把它摘掉或降速。其他渠道继续工作正常，但本渠道的 jobs 持续堆积。
+
+**表层（让恢复拖了 15 分钟）**：
+- 没有优雅停服：worker 死亡或重启时 lock 不会主动释放，必须等 `lockTimeoutSeconds` 自然到期；
+- sweep 与 claim 共用并发预算：`tick()` 把"扫过期"和"接新单"绑在同一个 `globalAvailable`，系统忙时 sweep 被 `return` 早退，遗孤 jobs 永久卡死；
+- sweep 硬过滤 `attempts >= max_attempts`：`max_attempts > 1` 时首次卡死（`attempts=0`）就永远扫不到。
+
+> 顺序含义：**不修底层（H3 + circuit breaker），只修表层，hang 还是会发生，只是恢复更快；反之修了底层，表层缺陷也不致命**。所以本条目按"先修底层、再修表层"排修复优先级。
 
 **修复方案**：
 
-1. **优雅停服**（最关键）：
+**先修底层（root cause）**：
+
+1. **给 imageAgent 加上 bodyTimeout**（修复 H3）：
+   ```ts
+   const imageAgent = new Agent({
+     bodyTimeout: 90_000,                 // 90s，比 headersTimeout 短
+     headersTimeout: IMAGE_REQUEST_TIMEOUT_MS,
+     ...
+   });
+   ```
+   同样的思路应该扩展到 `reference-image.ts` / `media-storage.ts` 的下游 fetch。
+
+2. **加渠道级 circuit breaker / 健康检查**（新 H10，见后）：
+   - 维护"近 N 分钟内失败率 / 平均延迟"窗口；
+   - 超过阈值（如 5 分钟内 5 次连续超时）→ 自动把该渠道标记为 `unhealthy`，admin 后台告警；
+   - `generateImage` 调度时跳过 unhealthy 渠道，提示用户稍后重试。
+
+**再修表层（恢复期）**：
+
+3. **优雅停服**：
    - `Dockerfile` 加 `STOPSIGNAL SIGTERM`
    - `docker-entrypoint.sh` 加 trap：
      ```sh
@@ -404,7 +432,7 @@ generations.status='processing' 的 8 条全部卡在同一 channel
      ```
    - 在 Next.js 启动脚本里监听 SIGTERM：先把 `generation_queue.enabled=false`，等所有 running 任务结算（最长 60s），再 `process.exit(0)`
 
-2. **sweep 独立预算**：
+4. **sweep 独立预算**：
    ```ts
    // tick() 拆成两步：sweep 永远跑，claim 受并发限制
    const sweepBudget = Math.max(8, queueConfig.imageConcurrency / 4);
@@ -418,33 +446,30 @@ generations.status='processing' 的 8 条全部卡在同一 channel
    }
    ```
 
-3. **放宽 sweep 条件**：
+5. **放宽 sweep 条件**：
    ```sql
    -- lib/db.ts:2136-2149
    WHERE status = 'running'
      AND locked_until < ?
      AND attempts > 0              -- 改成 ">0" 而不是 ">= max_attempts"
-   -- 这样 max_attempts=2 的首次卡死也能被扫
    ```
 
-4. **降低 `lockTimeoutSeconds` 默认值**：从 900 改为 300（5 分钟），减少用户等待时间
+6. **降低 `lockTimeoutSeconds` 默认值**：从 900 改为 300（5 分钟），减少用户等待时间
 
 **验证方式**：
 
 ```bash
-# 1. 触发场景模拟
-docker compose up -d sanhub                    # 重启容器
-docker exec -i sanhub-mysql mysql -uroot -p"$MYSQL_ROOT_PASSWORD" sanhub -e \
-  "SELECT id, status, locked_by, locked_until FROM generation_jobs WHERE status='running';"
+# 1. H3 修复：起一个 mock upstream，发完 headers 后 sleep 60s 不写 body
+# 修复前请求挂 60s；修复后 bodyTimeout=90s 时立刻被中断
+curl -i http://localhost:9999/test   # 触发上游 hang，断言 90s 内 504/超时
 
-# 修复前：旧 worker 的 jobs 在 15 分钟后才被 sweep
-# 修复后：优雅停服时锁被主动释放；或 sweep 在 5 分钟内回收
+# 2. circuit breaker 修复：
+# 模拟同一渠道连续 5 次 5xx → admin 后台该渠道 status 变 'unhealthy' → 第 6 次请求被拒
 
-# 2. 单元测试
-# mock tick() 让 state.active = imageConcurrency，验证 sweep 仍跑
+# 3. tick() 单元测试：mock state.active = imageConcurrency，验证 sweep 仍跑
 
-# 3. 事故重现
-# 准备 5 条 running jobs → 重启容器 → 立即看 sweep 是否触发
+# 4. 真实事故重现（修复后）：
+# 在 bc61379f 渠道上发 5 条 hang → 重启容器 → 期望：SIGTERM trap 先释放 lock，sweep 立刻命中
 ```
 
 **事故后现场状态**（2026-09-22 修复前）：
@@ -459,8 +484,102 @@ B. 4 个用户余额与预期一致：
    - 576668740@qq.com    987   (= 947 + 100 退款 - 60 新生成)
    - 749873830@qq.com    1450  (= 1430 + 20)
 C. generation_jobs 全表只剩 succeeded/failed，无 running
-D. 结论：系统自愈了，但用了 15 分钟
+D. 事故前后用户反馈：
+   - 用户确认"部署之前就已观察到 1 条以上卡死"——证明本次事故的根因是上游 hang
+     + bodyTimeout=0，不是容器重启
+   - 卡死的 6 条全部同 model fd56462c + 同 channel bc61379f，强证据指向该渠道上游 hang
+E. 结论：用户感知层面已恢复（sweep 兜底 + 重启解除了 hang 的 worker），但根因未修
+   下次同渠道再 hang 还会复现
 ```
+
+---
+
+### H10 · 缺渠道级 circuit breaker / 健康检查，单渠道 hang 能拖垮整个 worker
+
+**现象**：
+
+```ts
+// lib/image-generator.ts — generateImage 路径直接选 channel，没有健康度判断
+// 即便某渠道上游持续 hang，也不会自动跳过
+const channel = await pickChannelForModel(modelId, options);
+const result = await dispatch(channel, payload);   // ← hang 在这里会卡住 worker
+```
+
+```ts
+// image_channels 表当前没有 health 状态字段（schema 缺）：
+//   - consecutive_timeouts  INT DEFAULT 0
+//   - last_failure_at       BIGINT DEFAULT 0
+//   - last_success_at       BIGINT DEFAULT 0
+//   - health_status         ENUM('healthy','degraded','unhealthy','manual_disabled') DEFAULT 'healthy'
+//   - auto_disable_until    BIGINT DEFAULT 0  -- 自动跳过的截止时间
+```
+
+**影响**：
+- 单个渠道上游出现持续 hang（本次事故的 `bc61379f` + `fd56462c`），所有发往该渠道的请求都会卡在 worker 上，直到 `bodyTimeout`（现在是 `0` = 永不超时）；
+- 与 H3 / H9 复合放大：用户看到"处理中"长达数小时；其他渠道正常工作；
+- 没有任何机制告警 / 自动降级 / 自动恢复，依赖人工发现并 disable 该渠道。
+
+**根因**：
+- 渠道调度时**只看优先级 / cost / enabled**，不看**近期成功率 / 平均延迟**；
+- 没有滑动窗口记录渠道健康度；
+- 没有"近 N 次失败 → 临时跳过 → 冷却 → 重试"的 circuit breaker 模式；
+- admin 后台只能手动 disable，需要人盯着。
+
+**修复方案**（推荐 4 件，按优先级）：
+
+1. **加 channel health 表 / 字段**：
+   ```sql
+   ALTER TABLE image_channels
+     ADD COLUMN consecutive_failures  INT DEFAULT 0,
+     ADD COLUMN last_failure_at       BIGINT DEFAULT 0,
+     ADD COLUMN last_success_at       BIGINT DEFAULT 0,
+     ADD COLUMN health_status ENUM('healthy','degraded','unhealthy','disabled') DEFAULT 'healthy',
+     ADD COLUMN auto_disable_until    BIGINT DEFAULT 0;
+   ```
+
+2. **渠道调度时跳过 unhealthy**：
+   ```ts
+   async function pickChannelForModel(modelId: string): Promise<ImageChannel> {
+     const now = Date.now();
+     const candidates = await listChannelsByModel(modelId);
+     return candidates.find(c =>
+       c.enabled
+       && c.healthStatus !== 'unhealthy'
+       && (c.autoDisableUntil === 0 || c.autoDisableUntil < now)
+     ) ?? throw new Error('No healthy channel available');
+   }
+   ```
+
+3. **失败计数 + 自动降级**：
+   ```ts
+   // generateImage 出口 / 出口错误处
+   if (isTimeoutError(e) || is5xx(e)) {
+     await incrementChannelFailures(channel.id);
+     const fail = channel.consecutiveFailures + 1;
+     if (fail >= 5) {
+       await markChannelUnhealthy(channel.id, cooldownMs: 5 * 60 * 1000);
+       notifyAdmin(`渠道 ${channel.name} 自动降级，连续 ${fail} 次失败`);
+     }
+   } else {
+     await resetChannelFailures(channel.id);
+   }
+   ```
+
+4. **admin 后台 health 可视化**（UI 增列 + 自动降级原因）：
+   - 列表加 `health_status` 列，hover 显示 `last_failure_at` / `auto_disable_until`；
+   - "恢复"按钮可手动把 unhealthy 拉回 healthy。
+
+**验证方式**：
+- mock 上游持续返回 500 → 第 5 次失败后该渠道自动转 unhealthy → 第 6 次请求被 dispatch 跳过 → admin 后台 UI 显示降级原因
+- 5 分钟后 cooldown 到期，下一次请求恢复尝试（half-open 模式）
+
+**与 H3 / H9 的关系**：
+- H3（`bodyTimeout: 0`）让 hang 可以无限长；
+- H9 让 hang 的恢复被拖 15 分钟；
+- **H10 在 hang 刚发生时就把该渠道摘掉**，是比 H3/H9 更上游的防御；
+- 三个修法必须配套使用，只修一个治标不治本。
+
+**事故关联**：本次事故里 `bc61379f` 渠道持续 hang 50+ 分钟，期间系统没有任何机制察觉它病了——H10 正是为了把这种"静默生病"变成"主动告警 + 自动摘除"。
 
 ---
 
